@@ -1,0 +1,33 @@
+{
+  "name": "tagcloud-treemap2",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "eslint . --ext .js,.vue"
+  },
+  "dependencies": {
+    "@amap/amap-jsapi-loader": "^1.0.1",
+    "@turf/turf": "^6.5.0",
+    "axios": "^1.7.7",
+    "d3": "^7.8.5",
+    "d3-cloud": "^1.2.7",
+    "element-plus": "^2.8.3",
+    "intro.js": "^8.3.2",
+    "lodash-es": "^4.17.21",
+    "marked": "^17.0.1",
+    "pinia": "^2.2.4",
+    "pinyin-pro": "^3.27.0",
+    "vue": "^3.5.11"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.1.4",
+    "eslint": "^9.13.0",
+    "eslint-plugin-vue": "^9.29.1",
+    "sass": "^1.80.4",
+    "vite": "^5.4.8"
+  }
+}

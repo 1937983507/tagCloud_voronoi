@@ -1,0 +1,136 @@
+:root {
+  font-family: 'Segoe UI', 'Microsoft YaHei', -apple-system, BlinkMacSystemFont, sans-serif;
+  color: #1f2333;
+  background-color: #f4f6fb;
+  --primary-color: #399ceb;
+  --primary-hover: #2d8cd9;
+  --text-primary: #1f2333;
+  --text-secondary: #64748b;
+  --border-color: rgba(31, 35, 51, 0.08);
+  --shadow-sm: 0 2px 4px rgba(31, 35, 51, 0.06);
+  --shadow-md: 0 4px 12px rgba(31, 35, 51, 0.08);
+  --shadow-lg: 0 8px 24px rgba(31, 35, 51, 0.12);
+  --transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body,
+#app {
+  margin: 0;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.app-body {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: 108px 1fr 12px 68vw;
+  background-color: #fff;
+  min-height: 0;
+  overflow: hidden;
+  height: 100%;
+}
+
+.app-body > * {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.workspace {
+  max-width: 680px;
+  min-width: 440px;
+  padding: 15px;
+  background: linear-gradient(180deg, #f7f9fc 0%, #ffffff 100%);
+  min-height: 0;
+  height: 100%;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(31, 35, 51, 0.2) transparent;
+}
+
+.workspace::-webkit-scrollbar {
+  width: 6px;
+}
+
+.workspace::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.workspace::-webkit-scrollbar-thumb {
+  background: rgba(31, 35, 51, 0.2);
+  border-radius: 3px;
+}
+
+.panel-card {
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: var(--shadow-md);
+  padding: 20px;
+  border: 1px solid var(--border-color);
+  transition: box-shadow var(--transition);
+}
+
+.panel-card:hover {
+  box-shadow: var(--shadow-lg);
+}
+
+/* intro.js 引导样式优化 */
+.introjs-helperLayer {
+  background: rgba(57, 156, 235, 0.08) !important;
+  box-shadow: 0 0 0 9999px rgba(15, 23, 42, 0.45) !important;
+}
+
+.customTooltipClass {
+  border-radius: 16px !important;
+  padding: 16px 20px !important;
+  box-shadow: 0 12px 40px rgba(15, 23, 42, 0.18) !important;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.introjs-helperLayer .map-wrapper,
+.introjs-helperLayer .graph-panel,
+.introjs-helperLayer .table-card-placeholder,
+.introjs-helperLayer .tagcloud-panel,
+.introjs-helperLayer [data-intro-tutorial='tutorial-btn'],
+.introjs-helperLayer .panel-head,
+.introjs-helperLayer .canvas-wrapper {
+  filter: none !important;
+  backdrop-filter: none !important;
+  opacity: 1 !important;
+  position: relative !important;
+  z-index: 999999 !important;
+}
+
+.introjs-helperLayer .map-wrapper *,
+.introjs-helperLayer .graph-panel *,
+.introjs-helperLayer .table-card-placeholder *,
+.introjs-helperLayer .panel-head *,
+.introjs-helperLayer .canvas-wrapper *,
+[data-intro-tutorial='tutorial-btn'].introjs-showElement * {
+  filter: none !important;
+  backdrop-filter: none !important;
+  opacity: 1 !important;
+  color: inherit !important;
+  text-shadow: none !important;
+}
+
+.introjs-tooltipReferenceLayer,
+.customTooltipClass,
+.introjs-tooltip {
+  z-index: 10000000 !important;
+}
+
+.introjs-active .canvas-wrapper,
+.introjs-active .tagcloud-panel {
+  position: relative !important;
+}
+
+body.introjs-fixParent {
+  overflow: hidden !important;
+}
+
