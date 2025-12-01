@@ -1856,6 +1856,96 @@ const renderWordCloudFromLayout = (ctx, layout, width, height) => {
   });
 };
 
+/**
+ * 仅基于已有的加权Voronoi结果重新生成词云
+ * 不重新计算Voronoi背景，提升字体调整时的性能
+ */
+const relayoutWordCloudOnly = async () => {
+  if (
+    !poiStore.hasDrawing ||
+    !savedSites ||
+    !savedSites.length ||
+    !savedRegionPixelMap ||
+    !savedCanvasSize ||
+    !savedCityOrder ||
+    !savedColorIndices ||
+    !wordCloudCanvasRef.value
+  ) {
+    console.warn('[TagCloudCanvas] 缺少已保存的背景/布局信息，无法仅重新布局词云，回退到完整重绘');
+    await handleRenderCloud();
+    return;
+  }
+
+  const canvas = wordCloudCanvasRef.value;
+  const width = canvas.width;
+  const height = canvas.height;
+
+  // 如果画布尺寸与保存的尺寸不一致，说明布局环境已变，直接完整重绘
+  if (width !== savedCanvasSize.width || height !== savedCanvasSize.height) {
+    console.warn('[TagCloudCanvas] 画布尺寸与保存的Voronoi结果不一致，回退到完整重绘');
+    await handleRenderCloud();
+    return;
+  }
+
+  // 确保上下文可用
+  if (!wordCloudCtx) {
+    wordCloudCtx = canvas.getContext('2d');
+  }
+
+  // 确保碰撞检测 canvas 存在且尺寸一致
+  if (!collisionCanvas || collisionCanvas.width !== width || collisionCanvas.height !== height) {
+    collisionCanvas = document.createElement('canvas');
+    collisionCanvas.width = width;
+    collisionCanvas.height = height;
+    collisionCtx = collisionCanvas.getContext('2d');
+    collisionCanvas.style.display = 'none';
+  }
+
+  // 基于保存的站点信息构造 sites，用于词云布局
+  const sites = savedSites.map(s => ({
+    city: s.city,
+    x: s.x,
+    y: s.y,
+    weight: s.weight || 0.00001,
+  }));
+
+  // 重绘前开启遮罩并初始化提示
+  loadingStage.value = '正在重新布局标签云…';
+  loadingCurrentCity.value = '';
+  loadingCurrentIndex.value = 0;
+  loadingTotalCities.value = sites.length;
+  poiStore.setCloudLoading(true);
+  await nextTick(); // 让遮罩渲染
+  await waitNextFrame();
+
+  try {
+    // 清空之前的词云画布和布局缓存
+    wordCloudCtx.clearRect(0, 0, width, height);
+    savedWordCloudLayout = null;
+    fontMetricsCache.clear();
+
+    // 重新根据当前字体设置生成词云
+    await drawWordCloudInRegions(
+      wordCloudCtx,
+      collisionCtx,
+      sites,
+      poiStore.cityOrder,
+      poiStore.compiledData,
+      width,
+      height,
+      savedColorIndices
+    );
+  } finally {
+    poiStore.setCloudLoading(false);
+    loadingStage.value = '';
+    loadingCurrentCity.value = '';
+    loadingCurrentIndex.value = 0;
+    loadingTotalCities.value = 0;
+  }
+
+  console.log('[TagCloudCanvas] 仅重新布局词云完成（未重新计算加权Voronoi）');
+};
+
 // 绘制加权Voronoi图到Canvas（带迭代优化）
 const drawWeightedVoronoi = async (voronoiCanvas, voronoiCtx, wordCloudCanvas, wordCloudCtx, data, cityOrder, width, height) => {
   // 清空两个画布
@@ -2892,10 +2982,10 @@ watch(
   { deep: true }
 );
 
-// watch字体设置变化 - 区分完整重绘和样式重绘
+// watch字体设置变化 - 区分“仅重新布局词云”和“仅样式重绘”
 watch(
   () => ({...poiStore.fontSettings}),
-  (newVal, oldVal) => {
+  async (newVal, oldVal) => {
     if (!oldVal) {
       return;
     }
@@ -2915,10 +3005,10 @@ watch(
       newVal.fontWeight !== oldVal.fontWeight ||
       (newVal.fontFamily !== oldVal.fontFamily && newVal.language === 'zh'); // 中文字体库变化
     
-    // 如果需要完整重绘，触发完整重绘（重新定位标签）
+    // 如果需要完整重绘标签布局，优先只在现有Voronoi结果上重新生成词云
     if (needsFullRedraw && poiStore.hasDrawing) {
-      console.log('字体设置变化（语言/序号/字号区间/英文字体库），触发完整重绘（重新定位标签）...');
-      handleRenderCloud();
+      console.log('字体设置变化（语言/序号/字号区间/英文字体库），仅在现有加权Voronoi基础上重新布局词云（不重新计算背景）...');
+      await relayoutWordCloudOnly();
       return;
     }
     
