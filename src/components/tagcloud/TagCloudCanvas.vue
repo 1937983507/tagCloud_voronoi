@@ -86,6 +86,7 @@ import { usePoiStore } from '@/stores/poiStore';
 import axios from 'axios';
 import { ElButton, ElSpace, ElDropdown, ElDropdownMenu, ElDropdownItem, ElIcon, ElInputNumber, ElDialog, ElColorPicker, ElCheckbox } from 'element-plus';
 import { ArrowDown } from '@element-plus/icons-vue';
+import { cityNameToPinyin } from '@/utils/cityNameToPinyin';
 
 const exportDialogVisible = ref(false)
 const exportWidth = ref(800)
@@ -1018,9 +1019,10 @@ const drawTextToCollisionCanvas = (text, x, y, size, fontFamily, fontWeight, col
  * @param {number} height - 画布高度
  * @param {CanvasRenderingContext2D} ctx - Canvas上下文（用于测量文字）
  * @param {CanvasRenderingContext2D} collisionCtx - 碰撞检测canvas的上下文
+ * @param {Array} cityOrder - 城市顺序数组（用于获取城市序号）
  * @returns {Array} 已放置的词云项数组
  */
-const layoutWordCloud = (site, allSites, poiList, regionMap, width, height, ctx, collisionCtx) => {
+const layoutWordCloud = (site, allSites, poiList, regionMap, width, height, ctx, collisionCtx, cityOrder = []) => {
   if (!poiList || poiList.length === 0) {
     return [];
   }
@@ -1032,12 +1034,31 @@ const layoutWordCloud = (site, allSites, poiList, regionMap, width, height, ctx,
   const maxFontSize = fontSettings.maxFontSize || 40;
   const fontFamily = fontSettings.fontFamily || 'Arial';
   const fontWeight = fontSettings.fontWeight || '700';
+  const language = fontSettings.language || 'zh';
+  const showCityIndex = fontSettings.showCityIndex || false;
+  
+  // 处理城市名：根据语言转换为拼音，并根据序号添加前缀
+  let displayCityName = cityName;
+  
+  // 如果是英文模式，转换为拼音
+  if (language === 'en') {
+    displayCityName = cityNameToPinyin(cityName);
+  }
+  
+  // 如果需要显示序号，添加序号前缀
+  if (showCityIndex && cityOrder.length > 0) {
+    const cityIndex = cityOrder.indexOf(cityName);
+    if (cityIndex >= 0) {
+      displayCityName = `${cityIndex + 1}. ${displayCityName}`;
+    }
+  }
   
   // 将城市名也加入词云，城市名使用较大字体
   const cityWord = {
-    text: cityName,
+    text: displayCityName,
     popularity: 100, // 城市名权重最高
-    isCity: true
+    isCity: true,
+    city: cityName // 保存原始城市名（用于后续快速重绘时重新生成显示文本）
   };
   
   // 其他POI按排名排序（排名越小，权重越大）
@@ -1440,7 +1461,7 @@ const drawWordCloudInRegions = (ctx, collisionCtx, sites, cityOrder, data, width
       return;
     }
     
-    const wordCloud = layoutWordCloud(site, sites, cityPOIs, currentRegionMap, width, height, ctx, collisionCtx);
+    const wordCloud = layoutWordCloud(site, sites, cityPOIs, currentRegionMap, width, height, ctx, collisionCtx, cityOrder);
     allWordCloud.push(...wordCloud);
     console.log(`城市 ${site.city}: 放置了 ${wordCloud.length} 个标签`);
   });
@@ -1487,7 +1508,8 @@ const drawWordCloudInRegions = (ctx, collisionCtx, sites, cityOrder, data, width
       // 确定对应的城市
       let cityName = null;
       if (item.isCity) {
-        cityName = item.text;
+        // 对于城市名，item.city 保存的是原始城市名（在 layoutWordCloud 中设置的）
+        cityName = item.city || item.text;
       } else {
         // 优先使用item中保存的city字段（如果layoutWordCloud传递了city信息）
         if (item.city) {
@@ -1507,7 +1529,7 @@ const drawWordCloudInRegions = (ctx, collisionCtx, sites, cityOrder, data, width
         height: item.height,
         popularity: item.popularity,
         isCity: item.isCity,
-        city: cityName
+        city: cityName // 保存原始城市名（对于城市名，这是原始城市名；对于POI，这是所属城市名）
       };
     }),
     sites: sites.map(s => ({ city: s.city, x: s.x, y: s.y })),
@@ -1706,6 +1728,28 @@ const renderWordCloudFromLayout = (ctx, layout, width, height) => {
   layout.items.forEach(item => {
     // 城市名默认用红色字体
     let textColor = '#000000';
+    let displayText = item.text;
+    
+    // 如果是城市名，根据当前的语言和序号设置重新生成显示文本
+    if (item.isCity && item.city) {
+      const language = fontSettings.language || 'zh';
+      const showCityIndex = fontSettings.showCityIndex || false;
+      
+      // 根据语言转换为拼音
+      if (language === 'en') {
+        displayText = cityNameToPinyin(item.city);
+      } else {
+        displayText = item.city;
+      }
+      
+      // 如果需要显示序号，添加序号前缀
+      if (showCityIndex && layout.cityOrder && layout.cityOrder.length > 0) {
+        const cityIndex = layout.cityOrder.indexOf(item.city);
+        if (cityIndex >= 0) {
+          displayText = `${cityIndex + 1}. ${displayText}`;
+        }
+      }
+    }
     
     if (item.isCity) {
       // 城市名使用红色
@@ -1736,10 +1780,10 @@ const renderWordCloudFromLayout = (ctx, layout, width, height) => {
     if (item.isCity) {
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
       ctx.lineWidth = 2;
-      ctx.strokeText(item.text, item.x, item.y);
+      ctx.strokeText(displayText, item.x, item.y);
     }
     
-    ctx.fillText(item.text, item.x, item.y);
+    ctx.fillText(displayText, item.x, item.y);
     ctx.restore();
   });
 };
@@ -2594,7 +2638,7 @@ watch(
   { deep: true }
 );
 
-// watch字体设置变化 - 快速重绘词云
+// watch字体设置变化 - 区分完整重绘和样式重绘
 watch(
   () => ({...poiStore.fontSettings}),
   (newVal, oldVal) => {
@@ -2602,15 +2646,31 @@ watch(
       return;
     }
     
-    // 检查字体相关设置是否变化
-    const fontChanged = 
-      newVal.fontFamily !== oldVal.fontFamily ||
-      newVal.fontWeight !== oldVal.fontWeight ||
+    // 检查是否需要完整重绘（重新定位标签）
+    // 需要完整重绘的情况：语言、序号、字号区间、英文字体库
+    const needsFullRedraw = 
+      newVal.language !== oldVal.language ||
+      newVal.showCityIndex !== oldVal.showCityIndex ||
       newVal.minFontSize !== oldVal.minFontSize ||
-      newVal.maxFontSize !== oldVal.maxFontSize;
+      newVal.maxFontSize !== oldVal.maxFontSize ||
+      (newVal.fontFamily !== oldVal.fontFamily && newVal.language === 'en'); // 英文字体库变化
     
-    if (fontChanged && poiStore.hasDrawing && savedWordCloudLayout) {
-      console.log('字体设置变化，快速重绘词云...');
+    // 检查是否只需要样式重绘（基于原有位置重新绘制样式）
+    // 只需要样式重绘的情况：字重、中文字体库
+    const needsStyleRedraw = 
+      newVal.fontWeight !== oldVal.fontWeight ||
+      (newVal.fontFamily !== oldVal.fontFamily && newVal.language === 'zh'); // 中文字体库变化
+    
+    // 如果需要完整重绘，触发完整重绘（重新定位标签）
+    if (needsFullRedraw && poiStore.hasDrawing) {
+      console.log('字体设置变化（语言/序号/字号区间/英文字体库），触发完整重绘（重新定位标签）...');
+      handleRenderCloud();
+      return;
+    }
+    
+    // 如果只需要样式重绘，基于原有位置重新绘制样式
+    if (needsStyleRedraw && poiStore.hasDrawing && savedWordCloudLayout) {
+      console.log('字体设置变化（字重/中文字体库），快速重绘词云样式...');
       if (wordCloudCtx && wordCloudCanvas) {
         wordCloudCtx.clearRect(0, 0, wordCloudCanvas.width, wordCloudCanvas.height);
         renderWordCloudFromLayout(wordCloudCtx, savedWordCloudLayout, wordCloudCanvas.width, wordCloudCanvas.height);
