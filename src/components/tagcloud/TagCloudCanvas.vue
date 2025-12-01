@@ -120,6 +120,7 @@ let savedRegionPixelMap = null; // 保存区域像素映射（用于快速更新
 let savedCanvasSize = null; // 保存画布尺寸 {width, height}
 let savedCityOrder = null; // 保存城市顺序（用于验证是否需要重新生成）
 let savedColorIndices = null; // 保存颜色索引映射（用于快速更新背景颜色）
+let savedMultiColorColors = null; // 保存复色模式下的颜色信息（无论当前模式是什么，都保存复色模式的颜色，用于快速切换）
 
 // loading 遮罩状态
 const cloudLoading = computed(() => poiStore.cloudLoading);
@@ -477,10 +478,13 @@ const graphColoring = (adjacencyGraph, numColors) => {
  * @param {Array} sitesWithWeights - 站点数组（用于构建邻接图）
  * @param {number} width - 画布宽度
  * @param {number} height - 画布高度
+ * @param {boolean} forceMultiColor - 是否强制使用复色模式（用于保存复色颜色信息）
  * @returns {Object} { colors: [{r, g, b, a}, ...], colorIndices: [0, 1, 2, ...] }
  */
-const precomputeCityColors = (cityOrder, sitesWithWeights = null, width = null, height = null) => {
-  const opacity = poiStore.colorSettings.backgroundMode === 'multi' 
+const precomputeCityColors = (cityOrder, sitesWithWeights = null, width = null, height = null, forceMultiColor = false) => {
+  // 如果 forceMultiColor 为 true，总是使用复色模式的透明度（用于保存复色颜色信息）
+  // 否则根据当前的 backgroundMode 决定
+  const opacity = (forceMultiColor || poiStore.colorSettings.backgroundMode === 'multi')
     ? (poiStore.colorSettings.backgroundMultiColorOpacity ?? 0.1)
     : 1;
   
@@ -1545,44 +1549,85 @@ const fastUpdateBackgroundColors = (ctx, width, height, cityOrder) => {
     return false;
   }
   
-  // 计算透明度
-  const opacity = poiStore.colorSettings.backgroundMode === 'multi' 
-    ? (poiStore.colorSettings.backgroundMultiColorOpacity ?? 0.1)
-    : 1;
+  // 根据当前模式决定使用哪种颜色
+  const currentMode = poiStore.colorSettings.backgroundMode;
+  let colors;
   
-  // 使用保存的颜色索引映射，直接计算颜色（不需要重新计算图着色）
-  const colors = cityOrder.map((city, cityIndex) => {
-    // 使用保存的颜色索引
-    const colorIndex = savedColorIndices[cityIndex];
-    const bgColor = poiStore.Colors[colorIndex];
-    
-    // 转换颜色
+  if (currentMode === 'multi') {
+    // 复色模式：优先使用保存的复色颜色信息（如果存在）
+    if (savedMultiColorColors && savedMultiColorColors.length === cityOrder.length) {
+      // 使用保存的复色颜色，但需要根据当前的透明度设置更新alpha通道
+      const currentOpacity = poiStore.colorSettings.backgroundMultiColorOpacity ?? 0.1;
+      colors = savedMultiColorColors.map(c => {
+        // 保持RGB不变，只更新透明度
+        const baseOpacity = c.a / 255; // 原始透明度（0-1）
+        const newOpacity = currentOpacity; // 新的透明度设置
+        return {
+          r: c.r,
+          g: c.g,
+          b: c.b,
+          a: Math.floor(255 * newOpacity)
+        };
+      });
+      console.log('使用保存的复色颜色信息（已根据当前透明度设置更新）');
+    } else {
+      // 如果没有保存的复色颜色，回退到重新计算（不应该发生，但作为保险）
+      console.warn('没有保存的复色颜色信息，回退到重新计算');
+      const opacity = poiStore.colorSettings.backgroundMultiColorOpacity ?? 0.1;
+      colors = cityOrder.map((city, cityIndex) => {
+        const colorIndex = savedColorIndices[cityIndex];
+        const bgColor = poiStore.Colors[colorIndex];
+        
+        let r, g, b;
+        if (bgColor.startsWith('#')) {
+          const hex = bgColor.slice(1);
+          r = parseInt(hex.slice(0, 2), 16);
+          g = parseInt(hex.slice(2, 4), 16);
+          b = parseInt(hex.slice(4, 6), 16);
+        } else if (bgColor.startsWith('rgb')) {
+          const rgbMatch = bgColor.match(/\d+/g);
+          if (rgbMatch && rgbMatch.length >= 3) {
+            r = parseInt(rgbMatch[0]);
+            g = parseInt(rgbMatch[1]);
+            b = parseInt(rgbMatch[2]);
+          } else {
+            r = g = b = 200;
+          }
+        } else {
+          r = g = b = 200;
+        }
+        
+        return {
+          r,
+          g,
+          b,
+          a: Math.floor(255 * opacity)
+        };
+      });
+    }
+  } else {
+    // 单色模式：生成单色
+    const singleBgColor = poiStore.colorSettings.background || 'rgb(255, 255, 255)';
     let r, g, b;
-    if (bgColor.startsWith('#')) {
-      const hex = bgColor.slice(1);
+    if (singleBgColor.startsWith('#')) {
+      const hex = singleBgColor.slice(1);
       r = parseInt(hex.slice(0, 2), 16);
       g = parseInt(hex.slice(2, 4), 16);
       b = parseInt(hex.slice(4, 6), 16);
-    } else if (bgColor.startsWith('rgb')) {
-      const rgbMatch = bgColor.match(/\d+/g);
+    } else if (singleBgColor.startsWith('rgb')) {
+      const rgbMatch = singleBgColor.match(/\d+/g);
       if (rgbMatch && rgbMatch.length >= 3) {
         r = parseInt(rgbMatch[0]);
         g = parseInt(rgbMatch[1]);
         b = parseInt(rgbMatch[2]);
       } else {
-        r = g = b = 200;
+        r = g = b = 255;
       }
     } else {
-      r = g = b = 200;
+      r = g = b = 255;
     }
-    
-    return {
-      r,
-      g,
-      b,
-      a: Math.floor(255 * opacity)
-    };
-  });
+    colors = cityOrder.map(() => ({ r, g, b, a: 255 }));
+  }
   
   // 创建新的ImageData
   const imageData = new ImageData(width, height);
@@ -1995,7 +2040,42 @@ const drawWeightedVoronoi = async (voronoiCanvas, voronoiCtx, wordCloudCanvas, w
   
   // 使用最终站点位置和图着色算法预计算颜色（确保相邻区域不同颜色）
   console.log('使用图着色算法分配颜色...');
-  const { colors: precomputedColors, colorIndices } = precomputeCityColors(cityOrder, finalSites, width, height);
+  
+  // 重要：无论当前是单色还是复色模式，都要计算复色模式下的颜色（用于保存，以便快速切换）
+  const { colors: multiColorColors, colorIndices } = precomputeCityColors(cityOrder, finalSites, width, height, true);
+  
+  // 根据当前模式决定使用哪种颜色
+  const currentMode = poiStore.colorSettings.backgroundMode;
+  let precomputedColors;
+  if (currentMode === 'single') {
+    // 单色模式：生成单色的颜色（所有区域都是背景色）
+    const singleBgColor = poiStore.colorSettings.background || 'rgb(255, 255, 255)';
+    let r, g, b;
+    if (singleBgColor.startsWith('#')) {
+      const hex = singleBgColor.slice(1);
+      r = parseInt(hex.slice(0, 2), 16);
+      g = parseInt(hex.slice(2, 4), 16);
+      b = parseInt(hex.slice(4, 6), 16);
+    } else if (singleBgColor.startsWith('rgb')) {
+      const rgbMatch = singleBgColor.match(/\d+/g);
+      if (rgbMatch && rgbMatch.length >= 3) {
+        r = parseInt(rgbMatch[0]);
+        g = parseInt(rgbMatch[1]);
+        b = parseInt(rgbMatch[2]);
+      } else {
+        r = g = b = 255;
+      }
+    } else {
+      r = g = b = 255;
+    }
+    // 生成单色模式的颜色数组（所有区域都是相同的单色，完全不透明）
+    precomputedColors = cityOrder.map(() => ({ r, g, b, a: 255 }));
+    console.log('当前为单色模式，使用单色渲染，但已保存复色模式颜色信息');
+  } else {
+    // 复色模式：直接使用复色模式的颜色
+    precomputedColors = multiColorColors;
+    console.log('当前为复色模式，使用复色渲染');
+  }
   
   // 创建颜色索引映射（用于文字颜色）
   const colorIndicesMap = new Map();
@@ -2010,7 +2090,7 @@ const drawWeightedVoronoi = async (voronoiCanvas, voronoiCtx, wordCloudCanvas, w
     height,
     1,                      // 全分辨率（1像素）
     true,                   // 生成ImageData
-    precomputedColors,      // 使用预计算的颜色
+    precomputedColors,      // 使用当前模式的颜色（单色或复色）
     true                    // 保存区域像素映射（用于快速更新颜色）
   );
 
@@ -2018,7 +2098,11 @@ const drawWeightedVoronoi = async (voronoiCanvas, voronoiCtx, wordCloudCanvas, w
   savedRegionPixelMap = finalRegionPixelMap;
   savedCanvasSize = { width, height };
   savedCityOrder = [...cityOrder];
-  savedColorIndices = [...colorIndices]; // 保存颜色索引映射
+  savedColorIndices = [...colorIndices]; // 保存颜色索引映射（图着色结果）
+  
+  // 重要：保存复色模式下的颜色信息（无论当前模式是什么），用于快速切换到复色模式
+  // 注意：这里保存的是复色模式下的颜色（带透明度），不是单色模式的颜色
+  savedMultiColorColors = multiColorColors.map(c => ({ ...c })); // 深拷贝，避免引用问题
 
   // 绘制最终结果的Voronoi图到维诺图canvas
   voronoiCtx.putImageData(finalImageData, 0, 0);
@@ -2151,6 +2235,7 @@ const handleRenderCloud = async () => {
     savedCanvasSize = null; // 清空保存的画布尺寸
     savedCityOrder = null; // 清空保存的城市顺序
     savedColorIndices = null; // 清空保存的颜色索引映射
+    savedMultiColorColors = null; // 清空保存的复色模式颜色信息
     
     const data = poiStore.compiledData;
     const cityOrder = poiStore.cityOrder;
@@ -2298,6 +2383,7 @@ watch(
       savedCanvasSize = null; // 清空保存的画布尺寸
       savedCityOrder = null; // 清空保存的城市顺序
       savedColorIndices = null; // 清空保存的颜色索引映射
+      savedMultiColorColors = null; // 清空保存的复色模式颜色信息
     }
   }
 );
@@ -2363,8 +2449,8 @@ watch(
           
           // 文字颜色不需要变化（因为文字颜色由textColorMode控制）
         } else if (newVal.backgroundMode === 'multi' && savedRegionPixelMap && savedCityOrder && savedColorIndices) {
-          // 切换回复色模式：恢复之前存储的颜色
-          console.log('切换回复色模式，恢复之前存储的颜色...');
+          // 切换回复色模式：使用保存的复色颜色信息（即使一开始是单色模式，也保存了复色颜色）
+          console.log('切换回复色模式，使用保存的复色颜色信息...');
           const success = fastUpdateBackgroundColors(
             voronoiCtx, 
             voronoiCanvas.width, 
@@ -2376,6 +2462,8 @@ watch(
             console.log('同步更新文字颜色...');
             wordCloudCtx.clearRect(0, 0, wordCloudCanvas.width, wordCloudCanvas.height);
             renderWordCloudFromLayout(wordCloudCtx, savedWordCloudLayout, wordCloudCanvas.width, wordCloudCanvas.height);
+          } else if (!success) {
+            console.warn('快速更新背景颜色失败，可能需要完整重新生成');
           }
         } else {
           // 如果没有保存的数据，需要完整重新生成
