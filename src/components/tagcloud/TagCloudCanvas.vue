@@ -43,8 +43,9 @@
       </template>
     </el-dialog>
     <div class="canvas-wrapper" ref="wrapperRef">
-      <canvas ref="voronoiCanvasRef"></canvas>
-      <canvas ref="wordCloudCanvasRef"></canvas>
+      <canvas ref="voronoiCanvasRef" class="voronoi-canvas"></canvas>
+      <canvas ref="lineCanvasRef" class="line-canvas"></canvas>
+      <canvas ref="wordCloudCanvasRef" class="wordcloud-canvas"></canvas>
       <div v-if="(!poiStore.hasDrawing || !poiStore.cityOrder.length) && !cloudLoading" class="empty-cloud-hint">
         <div class="hint-content">
           <div class="hint-icon">
@@ -101,10 +102,13 @@ const poiStore = usePoiStore();
 const wrapperRef = ref(null);
 const voronoiCanvasRef = ref(null); // 维诺图canvas
 const wordCloudCanvasRef = ref(null); // 词云canvas
+const lineCanvasRef = ref(null); // 线条canvas
 let voronoiCanvas = null;
 let voronoiCtx = null;
 let wordCloudCanvas = null;
 let wordCloudCtx = null;
+let lineCanvas = null;
+let lineCtx = null;
 let collisionCanvas = null; // 隐藏的canvas，用于像素级碰撞检测
 let collisionCtx = null;
 let collisionImageData = null; // 缓存碰撞canvas的像素数据，避免频繁调用getImageData
@@ -122,6 +126,7 @@ let savedCanvasSize = null; // 保存画布尺寸 {width, height}
 let savedCityOrder = null; // 保存城市顺序（用于验证是否需要重新生成）
 let savedColorIndices = null; // 保存颜色索引映射（用于快速更新背景颜色）
 let savedMultiColorColors = null; // 保存复色模式下的颜色信息（无论当前模式是什么，都保存复色模式的颜色，用于快速切换）
+let savedSites = null; // 保存站点信息（用于绘制线条）：Array<{city, x, y, weight}>
 
 // loading 遮罩状态
 const cloudLoading = computed(() => poiStore.cloudLoading);
@@ -2222,9 +2227,15 @@ const drawWeightedVoronoi = async (voronoiCanvas, voronoiCtx, wordCloudCanvas, w
   
   console.log('区域映射生成完成，开始绘制词云...');
   
+  // 保存站点信息（用于绘制线条）
+  savedSites = finalSites.map(s => ({ city: s.city, x: s.x, y: s.y, weight: s.weight }));
+  
   // 绘制词云到词云canvas（传入碰撞检测canvas的上下文）
   // 传递颜色索引，确保文字颜色与背景颜色一致
   drawWordCloudInRegions(wordCloudCtx, collisionCtx, finalSites, cityOrder, data, width, height, colorIndices);
+  
+  // 绘制线条
+  drawCityLines();
 };
 
 const handleRenderCloud = async () => {
@@ -2275,6 +2286,14 @@ const handleRenderCloud = async () => {
     wordCloudCanvas.height = height;
     wordCloudCtx = wordCloudCanvas.getContext('2d');
     
+    // 初始化线条canvas
+    if (lineCanvasRef.value) {
+      lineCanvas = lineCanvasRef.value;
+      lineCanvas.width = width;
+      lineCanvas.height = height;
+      lineCtx = lineCanvas.getContext('2d');
+    }
+    
     // 清空保存的布局信息
     currentVoronoiRegions = null;
     currentCityOrder = null;
@@ -2309,6 +2328,117 @@ const handleRenderCloud = async () => {
     }
     poiStore.setCloudLoading(false);
   }
+};
+
+/**
+ * 绘制城市之间的连接线
+ */
+const drawCityLines = () => {
+  if (!lineCanvas || !lineCtx || !savedSites || !poiStore.cityOrder.length) {
+    return;
+  }
+  
+  const linePanel = poiStore.linePanel || { type: 'curve', width: 3, color: '#aaa' };
+  
+  // 如果线条类型为'none'，清空线条canvas
+  if (linePanel.type === 'none') {
+    lineCtx.clearRect(0, 0, lineCanvas.width, lineCanvas.height);
+    return;
+  }
+  
+  // 清空线条canvas
+  lineCtx.clearRect(0, 0, lineCanvas.width, lineCanvas.height);
+  
+  // 获取城市顺序
+  const cityOrder = poiStore.cityOrder;
+  if (cityOrder.length < 2) {
+    return; // 至少需要2个城市才能绘制线条
+  }
+  
+  // 创建城市到站点的映射
+  const cityToSiteMap = new Map();
+  savedSites.forEach(site => {
+    cityToSiteMap.set(site.city, site);
+  });
+  
+  // 获取线条样式
+  const lineWidth = linePanel.width || 3;
+  const lineColor = linePanel.color || '#aaa';
+  const isCurve = linePanel.type === 'curve';
+  
+  // 设置线条样式
+  lineCtx.strokeStyle = lineColor;
+  lineCtx.lineWidth = lineWidth;
+  lineCtx.lineCap = 'round';
+  lineCtx.lineJoin = 'round';
+  
+  // 按城市顺序获取坐标点
+  const points = [];
+  for (let i = 0; i < cityOrder.length; i++) {
+    const city = cityOrder[i];
+    const site = cityToSiteMap.get(city);
+    if (site) {
+      points.push({ x: site.x, y: site.y });
+    }
+  }
+  
+  if (points.length < 2) {
+    return; // 至少需要2个点
+  }
+  
+  // 绘制线条
+  lineCtx.beginPath();
+  
+  if (isCurve) {
+    // 绘制平滑曲线（使用三次贝塞尔曲线）
+    if (points.length === 2) {
+      // 只有两个点，直接连接
+      lineCtx.moveTo(points[0].x, points[0].y);
+      lineCtx.lineTo(points[1].x, points[1].y);
+    } else {
+      // 多个点，使用平滑曲线
+      lineCtx.moveTo(points[0].x, points[0].y);
+      
+      for (let i = 0; i < points.length - 1; i++) {
+        const curr = points[i];
+        const next = points[i + 1];
+        
+        if (i === 0) {
+          // 第一段：使用下一个点作为控制点
+          const cp1x = curr.x + (next.x - curr.x) * 0.5;
+          const cp1y = curr.y + (next.y - curr.y) * 0.5;
+          const cp2x = next.x - (i + 2 < points.length ? (points[i + 2].x - next.x) * 0.25 : 0);
+          const cp2y = next.y - (i + 2 < points.length ? (points[i + 2].y - next.y) * 0.25 : 0);
+          lineCtx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, next.x, next.y);
+        } else if (i === points.length - 2) {
+          // 最后一段：使用前一个点作为参考
+          const prev = points[i - 1];
+          const cp1x = curr.x + (next.x - prev.x) * 0.25;
+          const cp1y = curr.y + (next.y - prev.y) * 0.25;
+          const cp2x = next.x - (next.x - curr.x) * 0.5;
+          const cp2y = next.y - (next.y - curr.y) * 0.5;
+          lineCtx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, next.x, next.y);
+        } else {
+          // 中间段：使用前后点计算平滑的控制点
+          const prev = points[i - 1];
+          const nextNext = points[i + 2];
+          const cp1x = curr.x + (next.x - prev.x) * 0.25;
+          const cp1y = curr.y + (next.y - prev.y) * 0.25;
+          const cp2x = next.x - (nextNext.x - curr.x) * 0.25;
+          const cp2y = next.y - (nextNext.y - curr.y) * 0.25;
+          lineCtx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, next.x, next.y);
+        }
+      }
+    }
+  } else {
+    // 绘制折线
+    lineCtx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++) {
+      lineCtx.lineTo(points[i].x, points[i].y);
+    }
+  }
+  
+  lineCtx.stroke();
 };
 
 const handleExportCommand = (command) => {
@@ -2381,8 +2511,11 @@ const exportAsRaster = async (format = 'png', exportWidth=800, exportHeight=600,
   exportCtx.fillStyle = bgColor;
   exportCtx.fillRect(0, 0, exportCanvas.width, exportCanvas.height);
   
-  // 先绘制维诺图，再绘制词云
+  // 先绘制维诺图，再绘制线条，最后绘制词云
   exportCtx.drawImage(voronoiCanvasRef.value, 0, 0, exportWidth, exportHeight);
+  if (lineCanvasRef.value) {
+    exportCtx.drawImage(lineCanvasRef.value, 0, 0, exportWidth, exportHeight);
+  }
   exportCtx.drawImage(wordCloudCanvasRef.value, 0, 0, exportWidth, exportHeight);
   
   // 导出
@@ -2394,8 +2527,8 @@ const exportAsRaster = async (format = 'png', exportWidth=800, exportHeight=600,
 };
 
 onMounted(() => {
-  // 初始化两个Canvas
-  if (voronoiCanvasRef.value && wordCloudCanvasRef.value && wrapperRef.value) {
+  // 初始化三个Canvas
+  if (voronoiCanvasRef.value && wordCloudCanvasRef.value && lineCanvasRef.value && wrapperRef.value) {
     const rect = wrapperRef.value.getBoundingClientRect();
     voronoiCanvas = voronoiCanvasRef.value;
     voronoiCanvas.width = rect.width;
@@ -2406,6 +2539,11 @@ onMounted(() => {
     wordCloudCanvas.width = rect.width;
     wordCloudCanvas.height = rect.height;
     wordCloudCtx = wordCloudCanvas.getContext('2d');
+    
+    lineCanvas = lineCanvasRef.value;
+    lineCanvas.width = rect.width;
+    lineCanvas.height = rect.height;
+    lineCtx = lineCanvas.getContext('2d');
   }
 });
 
@@ -2419,6 +2557,10 @@ watch(
     if (!hasDrawing && voronoiCtx && voronoiCanvas && wordCloudCtx && wordCloudCanvas) {
       voronoiCtx.clearRect(0, 0, voronoiCanvas.width, voronoiCanvas.height);
       wordCloudCtx.clearRect(0, 0, wordCloudCanvas.width, wordCloudCanvas.height);
+      // 清空线条canvas
+      if (lineCtx && lineCanvas) {
+        lineCtx.clearRect(0, 0, lineCanvas.width, lineCanvas.height);
+      }
       // 清空碰撞检测canvas
       if (collisionCtx && collisionCanvas) {
         collisionCtx.clearRect(0, 0, collisionCanvas.width, collisionCanvas.height);
@@ -2432,6 +2574,7 @@ watch(
       savedCityOrder = null; // 清空保存的城市顺序
       savedColorIndices = null; // 清空保存的颜色索引映射
       savedMultiColorColors = null; // 清空保存的复色模式颜色信息
+      savedSites = null; // 清空保存的站点信息
     }
   }
 );
@@ -2448,6 +2591,20 @@ watch(
   (length) => {
     console.info('[TagCloudCanvas] compiledData 键数量', length);
   }
+);
+
+// 监听线条面板设置变化，重新绘制线条
+watch(
+  () => poiStore.linePanel,
+  (newPanel) => {
+    if (newPanel && savedSites && poiStore.hasDrawing) {
+      // 延迟绘制，确保 canvas 已更新
+      nextTick(() => {
+        drawCityLines();
+      });
+    }
+  },
+  { deep: true }
 );
 
 // watch配色设置变化
@@ -2725,12 +2882,16 @@ canvas {
   left: 0;
 }
 
-canvas:first-of-type {
+.voronoi-canvas {
   z-index: 1; /* 维诺图canvas在底层 */
 }
 
-canvas:last-of-type {
-  z-index: 2; /* 词云canvas在上层 */
+.line-canvas {
+  z-index: 2; /* 线条canvas在中间层 */
+}
+
+.wordcloud-canvas {
+  z-index: 3; /* 词云canvas在上层 */
 }
 
 .empty-cloud-hint {
