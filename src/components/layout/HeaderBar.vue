@@ -17,7 +17,7 @@
     </div>
     <div class="user-area">
       <a
-        href="https://github.com/1937983507/tagCloud_treemap2"
+        href="https://github.com/1937983507/tagCloud_voronoi"
         target="_blank"
         class="github-link"
         title="GitHub"
