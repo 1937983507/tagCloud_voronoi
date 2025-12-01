@@ -7,7 +7,7 @@
           data-intro-target="runTagCloudBtn"
           @click="handleRenderCloud"
         >
-          运行生成加权维诺图
+          运行生成标签云
         </el-button>
         <el-dropdown @command="handleExportCommand">
           <el-button>
@@ -43,8 +43,9 @@
       </template>
     </el-dialog>
     <div class="canvas-wrapper" ref="wrapperRef">
-      <canvas ref="voronoiCanvasRef"></canvas>
-      <canvas ref="wordCloudCanvasRef"></canvas>
+      <canvas ref="voronoiCanvasRef" class="voronoi-canvas"></canvas>
+      <canvas ref="lineCanvasRef" class="line-canvas"></canvas>
+      <canvas ref="wordCloudCanvasRef" class="wordcloud-canvas"></canvas>
       <div v-if="(!poiStore.hasDrawing || !poiStore.cityOrder.length) && !cloudLoading" class="empty-cloud-hint">
         <div class="hint-content">
           <div class="hint-icon">
@@ -55,8 +56,8 @@
             </svg>
           </div>
           <div class="hint-text">
-            <p class="hint-title">准备生成加权维诺图</p>
-            <p class="hint-desc">请先在地图上绘制折线，然后点击"运行生成加权维诺图"按钮</p>
+            <p class="hint-title">准备生成标签云</p>
+            <p class="hint-desc">请先在地图上绘制折线，然后点击"运行生成标签云"按钮</p>
           </div>
         </div>
       </div>
@@ -71,7 +72,7 @@
           <div class="spinner-dot"></div>
           <div class="spinner-dot"></div>
         </div>
-        <span class="cloud-loading-text">请稍等，正在生成加权维诺图...</span>
+        <span class="cloud-loading-text">请稍等，正在生成标签云...</span>
       </div>
     </div>
   </aside>
@@ -86,6 +87,7 @@ import { usePoiStore } from '@/stores/poiStore';
 import axios from 'axios';
 import { ElButton, ElSpace, ElDropdown, ElDropdownMenu, ElDropdownItem, ElIcon, ElInputNumber, ElDialog, ElColorPicker, ElCheckbox } from 'element-plus';
 import { ArrowDown } from '@element-plus/icons-vue';
+import { cityNameToPinyin } from '@/utils/cityNameToPinyin';
 
 const exportDialogVisible = ref(false)
 const exportWidth = ref(800)
@@ -100,10 +102,13 @@ const poiStore = usePoiStore();
 const wrapperRef = ref(null);
 const voronoiCanvasRef = ref(null); // 维诺图canvas
 const wordCloudCanvasRef = ref(null); // 词云canvas
+const lineCanvasRef = ref(null); // 线条canvas
 let voronoiCanvas = null;
 let voronoiCtx = null;
 let wordCloudCanvas = null;
 let wordCloudCtx = null;
+let lineCanvas = null;
+let lineCtx = null;
 let collisionCanvas = null; // 隐藏的canvas，用于像素级碰撞检测
 let collisionCtx = null;
 let collisionImageData = null; // 缓存碰撞canvas的像素数据，避免频繁调用getImageData
@@ -120,6 +125,8 @@ let savedRegionPixelMap = null; // 保存区域像素映射（用于快速更新
 let savedCanvasSize = null; // 保存画布尺寸 {width, height}
 let savedCityOrder = null; // 保存城市顺序（用于验证是否需要重新生成）
 let savedColorIndices = null; // 保存颜色索引映射（用于快速更新背景颜色）
+let savedMultiColorColors = null; // 保存复色模式下的颜色信息（无论当前模式是什么，都保存复色模式的颜色，用于快速切换）
+let savedSites = null; // 保存站点信息（用于绘制线条）：Array<{city, x, y, weight}>
 
 // loading 遮罩状态
 const cloudLoading = computed(() => poiStore.cloudLoading);
@@ -477,10 +484,13 @@ const graphColoring = (adjacencyGraph, numColors) => {
  * @param {Array} sitesWithWeights - 站点数组（用于构建邻接图）
  * @param {number} width - 画布宽度
  * @param {number} height - 画布高度
+ * @param {boolean} forceMultiColor - 是否强制使用复色模式（用于保存复色颜色信息）
  * @returns {Object} { colors: [{r, g, b, a}, ...], colorIndices: [0, 1, 2, ...] }
  */
-const precomputeCityColors = (cityOrder, sitesWithWeights = null, width = null, height = null) => {
-  const opacity = poiStore.colorSettings.backgroundMode === 'multi' 
+const precomputeCityColors = (cityOrder, sitesWithWeights = null, width = null, height = null, forceMultiColor = false) => {
+  // 如果 forceMultiColor 为 true，总是使用复色模式的透明度（用于保存复色颜色信息）
+  // 否则根据当前的 backgroundMode 决定
+  const opacity = (forceMultiColor || poiStore.colorSettings.backgroundMode === 'multi')
     ? (poiStore.colorSettings.backgroundMultiColorOpacity ?? 0.1)
     : 1;
   
@@ -1014,9 +1024,10 @@ const drawTextToCollisionCanvas = (text, x, y, size, fontFamily, fontWeight, col
  * @param {number} height - 画布高度
  * @param {CanvasRenderingContext2D} ctx - Canvas上下文（用于测量文字）
  * @param {CanvasRenderingContext2D} collisionCtx - 碰撞检测canvas的上下文
+ * @param {Array} cityOrder - 城市顺序数组（用于获取城市序号）
  * @returns {Array} 已放置的词云项数组
  */
-const layoutWordCloud = (site, allSites, poiList, regionMap, width, height, ctx, collisionCtx) => {
+const layoutWordCloud = (site, allSites, poiList, regionMap, width, height, ctx, collisionCtx, cityOrder = []) => {
   if (!poiList || poiList.length === 0) {
     return [];
   }
@@ -1028,12 +1039,31 @@ const layoutWordCloud = (site, allSites, poiList, regionMap, width, height, ctx,
   const maxFontSize = fontSettings.maxFontSize || 40;
   const fontFamily = fontSettings.fontFamily || 'Arial';
   const fontWeight = fontSettings.fontWeight || '700';
+  const language = fontSettings.language || 'zh';
+  const showCityIndex = fontSettings.showCityIndex || false;
+  
+  // 处理城市名：根据语言转换为拼音，并根据序号添加前缀
+  let displayCityName = cityName;
+  
+  // 如果是英文模式，转换为拼音
+  if (language === 'en') {
+    displayCityName = cityNameToPinyin(cityName);
+  }
+  
+  // 如果需要显示序号，添加序号前缀
+  if (showCityIndex && cityOrder.length > 0) {
+    const cityIndex = cityOrder.indexOf(cityName);
+    if (cityIndex >= 0) {
+      displayCityName = `${cityIndex + 1}. ${displayCityName}`;
+    }
+  }
   
   // 将城市名也加入词云，城市名使用较大字体
   const cityWord = {
-    text: cityName,
+    text: displayCityName,
     popularity: 100, // 城市名权重最高
-    isCity: true
+    isCity: true,
+    city: cityName // 保存原始城市名（用于后续快速重绘时重新生成显示文本）
   };
   
   // 其他POI按排名排序（排名越小，权重越大）
@@ -1436,7 +1466,7 @@ const drawWordCloudInRegions = (ctx, collisionCtx, sites, cityOrder, data, width
       return;
     }
     
-    const wordCloud = layoutWordCloud(site, sites, cityPOIs, currentRegionMap, width, height, ctx, collisionCtx);
+    const wordCloud = layoutWordCloud(site, sites, cityPOIs, currentRegionMap, width, height, ctx, collisionCtx, cityOrder);
     allWordCloud.push(...wordCloud);
     console.log(`城市 ${site.city}: 放置了 ${wordCloud.length} 个标签`);
   });
@@ -1483,7 +1513,8 @@ const drawWordCloudInRegions = (ctx, collisionCtx, sites, cityOrder, data, width
       // 确定对应的城市
       let cityName = null;
       if (item.isCity) {
-        cityName = item.text;
+        // 对于城市名，item.city 保存的是原始城市名（在 layoutWordCloud 中设置的）
+        cityName = item.city || item.text;
       } else {
         // 优先使用item中保存的city字段（如果layoutWordCloud传递了city信息）
         if (item.city) {
@@ -1503,7 +1534,7 @@ const drawWordCloudInRegions = (ctx, collisionCtx, sites, cityOrder, data, width
         height: item.height,
         popularity: item.popularity,
         isCity: item.isCity,
-        city: cityName
+        city: cityName // 保存原始城市名（对于城市名，这是原始城市名；对于POI，这是所属城市名）
       };
     }),
     sites: sites.map(s => ({ city: s.city, x: s.x, y: s.y })),
@@ -1523,9 +1554,10 @@ const drawWordCloudInRegions = (ctx, collisionCtx, sites, cityOrder, data, width
  * @param {number} width - 画布宽度
  * @param {number} height - 画布高度
  * @param {Array} cityOrder - 城市顺序
+ * @param {boolean} forceRecalculateFromPalette - 是否强制从配色方案重新计算（用于配色方案变化时）
  * @returns {boolean} 是否成功更新
  */
-const fastUpdateBackgroundColors = (ctx, width, height, cityOrder) => {
+const fastUpdateBackgroundColors = (ctx, width, height, cityOrder, forceRecalculateFromPalette = false) => {
   // 检查是否有保存的区域映射
   if (!savedRegionPixelMap || !savedCanvasSize || !savedCityOrder || !savedColorIndices) {
     console.warn('没有保存的区域映射或颜色索引，无法快速更新背景颜色');
@@ -1545,44 +1577,88 @@ const fastUpdateBackgroundColors = (ctx, width, height, cityOrder) => {
     return false;
   }
   
-  // 计算透明度
-  const opacity = poiStore.colorSettings.backgroundMode === 'multi' 
-    ? (poiStore.colorSettings.backgroundMultiColorOpacity ?? 0.1)
-    : 1;
+  // 根据当前模式决定使用哪种颜色
+  const currentMode = poiStore.colorSettings.backgroundMode;
+  let colors;
   
-  // 使用保存的颜色索引映射，直接计算颜色（不需要重新计算图着色）
-  const colors = cityOrder.map((city, cityIndex) => {
-    // 使用保存的颜色索引
-    const colorIndex = savedColorIndices[cityIndex];
-    const bgColor = poiStore.Colors[colorIndex];
-    
-    // 转换颜色
+  if (currentMode === 'multi') {
+    // 复色模式
+    // 如果强制重新计算（配色方案变化时），或者没有保存的复色颜色，从配色方案重新计算
+    if (forceRecalculateFromPalette || !savedMultiColorColors || savedMultiColorColors.length !== cityOrder.length) {
+      // 从当前的配色方案重新计算颜色（确保与文字颜色一致）
+      const opacity = poiStore.colorSettings.backgroundMultiColorOpacity ?? 0.1;
+      colors = cityOrder.map((city, cityIndex) => {
+        const colorIndex = savedColorIndices[cityIndex];
+        const bgColor = poiStore.Colors[colorIndex]; // 从新的配色方案获取颜色
+        
+        let r, g, b;
+        if (bgColor.startsWith('#')) {
+          const hex = bgColor.slice(1);
+          r = parseInt(hex.slice(0, 2), 16);
+          g = parseInt(hex.slice(2, 4), 16);
+          b = parseInt(hex.slice(4, 6), 16);
+        } else if (bgColor.startsWith('rgb')) {
+          const rgbMatch = bgColor.match(/\d+/g);
+          if (rgbMatch && rgbMatch.length >= 3) {
+            r = parseInt(rgbMatch[0]);
+            g = parseInt(rgbMatch[1]);
+            b = parseInt(rgbMatch[2]);
+          } else {
+            r = g = b = 200;
+          }
+        } else {
+          r = g = b = 200;
+        }
+        
+        return {
+          r,
+          g,
+          b,
+          a: Math.floor(255 * opacity)
+        };
+      });
+      if (forceRecalculateFromPalette) {
+        console.log('配色方案变化，从新的配色方案重新计算背景颜色（确保与文字颜色一致）');
+      } else {
+        console.warn('没有保存的复色颜色信息，从配色方案重新计算');
+      }
+    } else {
+      // 使用保存的复色颜色（仅用于透明度变化等情况，不用于配色方案变化）
+      const currentOpacity = poiStore.colorSettings.backgroundMultiColorOpacity ?? 0.1;
+      colors = savedMultiColorColors.map(c => {
+        // 保持RGB不变，只更新透明度
+        return {
+          r: c.r,
+          g: c.g,
+          b: c.b,
+          a: Math.floor(255 * currentOpacity)
+        };
+      });
+      console.log('使用保存的复色颜色信息（已根据当前透明度设置更新）');
+    }
+  } else {
+    // 单色模式：生成单色
+    const singleBgColor = poiStore.colorSettings.background || 'rgb(255, 255, 255)';
     let r, g, b;
-    if (bgColor.startsWith('#')) {
-      const hex = bgColor.slice(1);
+    if (singleBgColor.startsWith('#')) {
+      const hex = singleBgColor.slice(1);
       r = parseInt(hex.slice(0, 2), 16);
       g = parseInt(hex.slice(2, 4), 16);
       b = parseInt(hex.slice(4, 6), 16);
-    } else if (bgColor.startsWith('rgb')) {
-      const rgbMatch = bgColor.match(/\d+/g);
+    } else if (singleBgColor.startsWith('rgb')) {
+      const rgbMatch = singleBgColor.match(/\d+/g);
       if (rgbMatch && rgbMatch.length >= 3) {
         r = parseInt(rgbMatch[0]);
         g = parseInt(rgbMatch[1]);
         b = parseInt(rgbMatch[2]);
       } else {
-        r = g = b = 200;
+        r = g = b = 255;
       }
     } else {
-      r = g = b = 200;
+      r = g = b = 255;
     }
-    
-    return {
-      r,
-      g,
-      b,
-      a: Math.floor(255 * opacity)
-    };
-  });
+    colors = cityOrder.map(() => ({ r, g, b, a: 255 }));
+  }
   
   // 创建新的ImageData
   const imageData = new ImageData(width, height);
@@ -1657,6 +1733,28 @@ const renderWordCloudFromLayout = (ctx, layout, width, height) => {
   layout.items.forEach(item => {
     // 城市名默认用红色字体
     let textColor = '#000000';
+    let displayText = item.text;
+    
+    // 如果是城市名，根据当前的语言和序号设置重新生成显示文本
+    if (item.isCity && item.city) {
+      const language = fontSettings.language || 'zh';
+      const showCityIndex = fontSettings.showCityIndex || false;
+      
+      // 根据语言转换为拼音
+      if (language === 'en') {
+        displayText = cityNameToPinyin(item.city);
+      } else {
+        displayText = item.city;
+      }
+      
+      // 如果需要显示序号，添加序号前缀
+      if (showCityIndex && layout.cityOrder && layout.cityOrder.length > 0) {
+        const cityIndex = layout.cityOrder.indexOf(item.city);
+        if (cityIndex >= 0) {
+          displayText = `${cityIndex + 1}. ${displayText}`;
+        }
+      }
+    }
     
     if (item.isCity) {
       // 城市名使用红色
@@ -1687,10 +1785,10 @@ const renderWordCloudFromLayout = (ctx, layout, width, height) => {
     if (item.isCity) {
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
       ctx.lineWidth = 2;
-      ctx.strokeText(item.text, item.x, item.y);
+      ctx.strokeText(displayText, item.x, item.y);
     }
     
-    ctx.fillText(item.text, item.x, item.y);
+    ctx.fillText(displayText, item.x, item.y);
     ctx.restore();
   });
 };
@@ -1995,7 +2093,42 @@ const drawWeightedVoronoi = async (voronoiCanvas, voronoiCtx, wordCloudCanvas, w
   
   // 使用最终站点位置和图着色算法预计算颜色（确保相邻区域不同颜色）
   console.log('使用图着色算法分配颜色...');
-  const { colors: precomputedColors, colorIndices } = precomputeCityColors(cityOrder, finalSites, width, height);
+  
+  // 重要：无论当前是单色还是复色模式，都要计算复色模式下的颜色（用于保存，以便快速切换）
+  const { colors: multiColorColors, colorIndices } = precomputeCityColors(cityOrder, finalSites, width, height, true);
+  
+  // 根据当前模式决定使用哪种颜色
+  const currentMode = poiStore.colorSettings.backgroundMode;
+  let precomputedColors;
+  if (currentMode === 'single') {
+    // 单色模式：生成单色的颜色（所有区域都是背景色）
+    const singleBgColor = poiStore.colorSettings.background || 'rgb(255, 255, 255)';
+    let r, g, b;
+    if (singleBgColor.startsWith('#')) {
+      const hex = singleBgColor.slice(1);
+      r = parseInt(hex.slice(0, 2), 16);
+      g = parseInt(hex.slice(2, 4), 16);
+      b = parseInt(hex.slice(4, 6), 16);
+    } else if (singleBgColor.startsWith('rgb')) {
+      const rgbMatch = singleBgColor.match(/\d+/g);
+      if (rgbMatch && rgbMatch.length >= 3) {
+        r = parseInt(rgbMatch[0]);
+        g = parseInt(rgbMatch[1]);
+        b = parseInt(rgbMatch[2]);
+      } else {
+        r = g = b = 255;
+      }
+    } else {
+      r = g = b = 255;
+    }
+    // 生成单色模式的颜色数组（所有区域都是相同的单色，完全不透明）
+    precomputedColors = cityOrder.map(() => ({ r, g, b, a: 255 }));
+    console.log('当前为单色模式，使用单色渲染，但已保存复色模式颜色信息');
+  } else {
+    // 复色模式：直接使用复色模式的颜色
+    precomputedColors = multiColorColors;
+    console.log('当前为复色模式，使用复色渲染');
+  }
   
   // 创建颜色索引映射（用于文字颜色）
   const colorIndicesMap = new Map();
@@ -2010,7 +2143,7 @@ const drawWeightedVoronoi = async (voronoiCanvas, voronoiCtx, wordCloudCanvas, w
     height,
     1,                      // 全分辨率（1像素）
     true,                   // 生成ImageData
-    precomputedColors,      // 使用预计算的颜色
+    precomputedColors,      // 使用当前模式的颜色（单色或复色）
     true                    // 保存区域像素映射（用于快速更新颜色）
   );
 
@@ -2018,7 +2151,11 @@ const drawWeightedVoronoi = async (voronoiCanvas, voronoiCtx, wordCloudCanvas, w
   savedRegionPixelMap = finalRegionPixelMap;
   savedCanvasSize = { width, height };
   savedCityOrder = [...cityOrder];
-  savedColorIndices = [...colorIndices]; // 保存颜色索引映射
+  savedColorIndices = [...colorIndices]; // 保存颜色索引映射（图着色结果）
+  
+  // 重要：保存复色模式下的颜色信息（无论当前模式是什么），用于快速切换到复色模式
+  // 注意：这里保存的是复色模式下的颜色（带透明度），不是单色模式的颜色
+  savedMultiColorColors = multiColorColors.map(c => ({ ...c })); // 深拷贝，避免引用问题
 
   // 绘制最终结果的Voronoi图到维诺图canvas
   voronoiCtx.putImageData(finalImageData, 0, 0);
@@ -2090,9 +2227,15 @@ const drawWeightedVoronoi = async (voronoiCanvas, voronoiCtx, wordCloudCanvas, w
   
   console.log('区域映射生成完成，开始绘制词云...');
   
+  // 保存站点信息（用于绘制线条）
+  savedSites = finalSites.map(s => ({ city: s.city, x: s.x, y: s.y, weight: s.weight }));
+  
   // 绘制词云到词云canvas（传入碰撞检测canvas的上下文）
   // 传递颜色索引，确保文字颜色与背景颜色一致
   drawWordCloudInRegions(wordCloudCtx, collisionCtx, finalSites, cityOrder, data, width, height, colorIndices);
+  
+  // 绘制线条
+  drawCityLines();
 };
 
 const handleRenderCloud = async () => {
@@ -2143,6 +2286,14 @@ const handleRenderCloud = async () => {
     wordCloudCanvas.height = height;
     wordCloudCtx = wordCloudCanvas.getContext('2d');
     
+    // 初始化线条canvas
+    if (lineCanvasRef.value) {
+      lineCanvas = lineCanvasRef.value;
+      lineCanvas.width = width;
+      lineCanvas.height = height;
+      lineCtx = lineCanvas.getContext('2d');
+    }
+    
     // 清空保存的布局信息
     currentVoronoiRegions = null;
     currentCityOrder = null;
@@ -2151,6 +2302,7 @@ const handleRenderCloud = async () => {
     savedCanvasSize = null; // 清空保存的画布尺寸
     savedCityOrder = null; // 清空保存的城市顺序
     savedColorIndices = null; // 清空保存的颜色索引映射
+    savedMultiColorColors = null; // 清空保存的复色模式颜色信息
     
     const data = poiStore.compiledData;
     const cityOrder = poiStore.cityOrder;
@@ -2176,6 +2328,117 @@ const handleRenderCloud = async () => {
     }
     poiStore.setCloudLoading(false);
   }
+};
+
+/**
+ * 绘制城市之间的连接线
+ */
+const drawCityLines = () => {
+  if (!lineCanvas || !lineCtx || !savedSites || !poiStore.cityOrder.length) {
+    return;
+  }
+  
+  const linePanel = poiStore.linePanel || { type: 'curve', width: 3, color: '#aaa' };
+  
+  // 如果线条类型为'none'，清空线条canvas
+  if (linePanel.type === 'none') {
+    lineCtx.clearRect(0, 0, lineCanvas.width, lineCanvas.height);
+    return;
+  }
+  
+  // 清空线条canvas
+  lineCtx.clearRect(0, 0, lineCanvas.width, lineCanvas.height);
+  
+  // 获取城市顺序
+  const cityOrder = poiStore.cityOrder;
+  if (cityOrder.length < 2) {
+    return; // 至少需要2个城市才能绘制线条
+  }
+  
+  // 创建城市到站点的映射
+  const cityToSiteMap = new Map();
+  savedSites.forEach(site => {
+    cityToSiteMap.set(site.city, site);
+  });
+  
+  // 获取线条样式
+  const lineWidth = linePanel.width || 3;
+  const lineColor = linePanel.color || '#aaa';
+  const isCurve = linePanel.type === 'curve';
+  
+  // 设置线条样式
+  lineCtx.strokeStyle = lineColor;
+  lineCtx.lineWidth = lineWidth;
+  lineCtx.lineCap = 'round';
+  lineCtx.lineJoin = 'round';
+  
+  // 按城市顺序获取坐标点
+  const points = [];
+  for (let i = 0; i < cityOrder.length; i++) {
+    const city = cityOrder[i];
+    const site = cityToSiteMap.get(city);
+    if (site) {
+      points.push({ x: site.x, y: site.y });
+    }
+  }
+  
+  if (points.length < 2) {
+    return; // 至少需要2个点
+  }
+  
+  // 绘制线条
+  lineCtx.beginPath();
+  
+  if (isCurve) {
+    // 绘制平滑曲线（使用三次贝塞尔曲线）
+    if (points.length === 2) {
+      // 只有两个点，直接连接
+      lineCtx.moveTo(points[0].x, points[0].y);
+      lineCtx.lineTo(points[1].x, points[1].y);
+    } else {
+      // 多个点，使用平滑曲线
+      lineCtx.moveTo(points[0].x, points[0].y);
+      
+      for (let i = 0; i < points.length - 1; i++) {
+        const curr = points[i];
+        const next = points[i + 1];
+        
+        if (i === 0) {
+          // 第一段：使用下一个点作为控制点
+          const cp1x = curr.x + (next.x - curr.x) * 0.5;
+          const cp1y = curr.y + (next.y - curr.y) * 0.5;
+          const cp2x = next.x - (i + 2 < points.length ? (points[i + 2].x - next.x) * 0.25 : 0);
+          const cp2y = next.y - (i + 2 < points.length ? (points[i + 2].y - next.y) * 0.25 : 0);
+          lineCtx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, next.x, next.y);
+        } else if (i === points.length - 2) {
+          // 最后一段：使用前一个点作为参考
+          const prev = points[i - 1];
+          const cp1x = curr.x + (next.x - prev.x) * 0.25;
+          const cp1y = curr.y + (next.y - prev.y) * 0.25;
+          const cp2x = next.x - (next.x - curr.x) * 0.5;
+          const cp2y = next.y - (next.y - curr.y) * 0.5;
+          lineCtx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, next.x, next.y);
+        } else {
+          // 中间段：使用前后点计算平滑的控制点
+          const prev = points[i - 1];
+          const nextNext = points[i + 2];
+          const cp1x = curr.x + (next.x - prev.x) * 0.25;
+          const cp1y = curr.y + (next.y - prev.y) * 0.25;
+          const cp2x = next.x - (nextNext.x - curr.x) * 0.25;
+          const cp2y = next.y - (nextNext.y - curr.y) * 0.25;
+          lineCtx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, next.x, next.y);
+        }
+      }
+    }
+  } else {
+    // 绘制折线
+    lineCtx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++) {
+      lineCtx.lineTo(points[i].x, points[i].y);
+    }
+  }
+  
+  lineCtx.stroke();
 };
 
 const handleExportCommand = (command) => {
@@ -2248,8 +2511,11 @@ const exportAsRaster = async (format = 'png', exportWidth=800, exportHeight=600,
   exportCtx.fillStyle = bgColor;
   exportCtx.fillRect(0, 0, exportCanvas.width, exportCanvas.height);
   
-  // 先绘制维诺图，再绘制词云
+  // 先绘制维诺图，再绘制线条，最后绘制词云
   exportCtx.drawImage(voronoiCanvasRef.value, 0, 0, exportWidth, exportHeight);
+  if (lineCanvasRef.value) {
+    exportCtx.drawImage(lineCanvasRef.value, 0, 0, exportWidth, exportHeight);
+  }
   exportCtx.drawImage(wordCloudCanvasRef.value, 0, 0, exportWidth, exportHeight);
   
   // 导出
@@ -2261,8 +2527,8 @@ const exportAsRaster = async (format = 'png', exportWidth=800, exportHeight=600,
 };
 
 onMounted(() => {
-  // 初始化两个Canvas
-  if (voronoiCanvasRef.value && wordCloudCanvasRef.value && wrapperRef.value) {
+  // 初始化三个Canvas
+  if (voronoiCanvasRef.value && wordCloudCanvasRef.value && lineCanvasRef.value && wrapperRef.value) {
     const rect = wrapperRef.value.getBoundingClientRect();
     voronoiCanvas = voronoiCanvasRef.value;
     voronoiCanvas.width = rect.width;
@@ -2273,6 +2539,11 @@ onMounted(() => {
     wordCloudCanvas.width = rect.width;
     wordCloudCanvas.height = rect.height;
     wordCloudCtx = wordCloudCanvas.getContext('2d');
+    
+    lineCanvas = lineCanvasRef.value;
+    lineCanvas.width = rect.width;
+    lineCanvas.height = rect.height;
+    lineCtx = lineCanvas.getContext('2d');
   }
 });
 
@@ -2286,6 +2557,10 @@ watch(
     if (!hasDrawing && voronoiCtx && voronoiCanvas && wordCloudCtx && wordCloudCanvas) {
       voronoiCtx.clearRect(0, 0, voronoiCanvas.width, voronoiCanvas.height);
       wordCloudCtx.clearRect(0, 0, wordCloudCanvas.width, wordCloudCanvas.height);
+      // 清空线条canvas
+      if (lineCtx && lineCanvas) {
+        lineCtx.clearRect(0, 0, lineCanvas.width, lineCanvas.height);
+      }
       // 清空碰撞检测canvas
       if (collisionCtx && collisionCanvas) {
         collisionCtx.clearRect(0, 0, collisionCanvas.width, collisionCanvas.height);
@@ -2298,6 +2573,8 @@ watch(
       savedCanvasSize = null; // 清空保存的画布尺寸
       savedCityOrder = null; // 清空保存的城市顺序
       savedColorIndices = null; // 清空保存的颜色索引映射
+      savedMultiColorColors = null; // 清空保存的复色模式颜色信息
+      savedSites = null; // 清空保存的站点信息
     }
   }
 );
@@ -2314,6 +2591,20 @@ watch(
   (length) => {
     console.info('[TagCloudCanvas] compiledData 键数量', length);
   }
+);
+
+// 监听线条面板设置变化，重新绘制线条
+watch(
+  () => poiStore.linePanel,
+  (newPanel) => {
+    if (newPanel && savedSites && poiStore.hasDrawing) {
+      // 延迟绘制，确保 canvas 已更新
+      nextTick(() => {
+        drawCityLines();
+      });
+    }
+  },
+  { deep: true }
 );
 
 // watch配色设置变化
@@ -2363,8 +2654,8 @@ watch(
           
           // 文字颜色不需要变化（因为文字颜色由textColorMode控制）
         } else if (newVal.backgroundMode === 'multi' && savedRegionPixelMap && savedCityOrder && savedColorIndices) {
-          // 切换回复色模式：恢复之前存储的颜色
-          console.log('切换回复色模式，恢复之前存储的颜色...');
+          // 切换回复色模式：使用保存的复色颜色信息（即使一开始是单色模式，也保存了复色颜色）
+          console.log('切换回复色模式，使用保存的复色颜色信息...');
           const success = fastUpdateBackgroundColors(
             voronoiCtx, 
             voronoiCanvas.width, 
@@ -2376,6 +2667,8 @@ watch(
             console.log('同步更新文字颜色...');
             wordCloudCtx.clearRect(0, 0, wordCloudCanvas.width, wordCloudCanvas.height);
             renderWordCloudFromLayout(wordCloudCtx, savedWordCloudLayout, wordCloudCanvas.width, wordCloudCanvas.height);
+          } else if (!success) {
+            console.warn('快速更新背景颜色失败，可能需要完整重新生成');
           }
         } else {
           // 如果没有保存的数据，需要完整重新生成
@@ -2387,18 +2680,57 @@ watch(
       // 优先处理配色方案变化（色带颜色自定义）- 必须使用快速更新
       if (paletteChanged && !backgroundModeChanged && savedRegionPixelMap && savedCityOrder && savedColorIndices) {
         // 配色方案变化（色带颜色自定义），颜色索引不变，只需更新颜色值
+        // 重要：必须强制从新的配色方案重新计算，确保背景色和文字颜色一致
         console.log('配色方案变化（色带颜色自定义），快速更新背景和文字颜色...');
         if (voronoiCtx && voronoiCanvas) {
           const success = fastUpdateBackgroundColors(
             voronoiCtx, 
             voronoiCanvas.width, 
             voronoiCanvas.height, 
-            poiStore.cityOrder
+            poiStore.cityOrder,
+            true  // 强制从配色方案重新计算，不使用保存的旧颜色
           );
           if (success) {
+            // 重要：更新保存的复色颜色信息，使用新的配色方案
+            // 这样后续切换模式时也能使用正确的颜色
+            if (poiStore.colorSettings.backgroundMode === 'multi' && savedColorIndices) {
+              const opacity = poiStore.colorSettings.backgroundMultiColorOpacity ?? 0.1;
+              savedMultiColorColors = poiStore.cityOrder.map((city, cityIndex) => {
+                const colorIndex = savedColorIndices[cityIndex];
+                const bgColor = poiStore.Colors[colorIndex]; // 从新的配色方案获取颜色
+                
+                let r, g, b;
+                if (bgColor.startsWith('#')) {
+                  const hex = bgColor.slice(1);
+                  r = parseInt(hex.slice(0, 2), 16);
+                  g = parseInt(hex.slice(2, 4), 16);
+                  b = parseInt(hex.slice(4, 6), 16);
+                } else if (bgColor.startsWith('rgb')) {
+                  const rgbMatch = bgColor.match(/\d+/g);
+                  if (rgbMatch && rgbMatch.length >= 3) {
+                    r = parseInt(rgbMatch[0]);
+                    g = parseInt(rgbMatch[1]);
+                    b = parseInt(rgbMatch[2]);
+                  } else {
+                    r = g = b = 200;
+                  }
+                } else {
+                  r = g = b = 200;
+                }
+                
+                return {
+                  r,
+                  g,
+                  b,
+                  a: Math.floor(255 * opacity)
+                };
+              });
+              console.log('已更新保存的复色颜色信息，使用新的配色方案');
+            }
+            
             // 背景颜色更新成功后，同步更新文字颜色（确保使用相同的颜色索引和颜色值）
             if (savedWordCloudLayout && wordCloudCtx && wordCloudCanvas) {
-              console.log('同步更新文字颜色（使用相同的图着色颜色索引）...');
+              console.log('同步更新文字颜色（使用相同的图着色颜色索引和新的配色方案）...');
               wordCloudCtx.clearRect(0, 0, wordCloudCanvas.width, wordCloudCanvas.height);
               renderWordCloudFromLayout(wordCloudCtx, savedWordCloudLayout, wordCloudCanvas.width, wordCloudCanvas.height);
             }
@@ -2463,7 +2795,7 @@ watch(
   { deep: true }
 );
 
-// watch字体设置变化 - 快速重绘词云
+// watch字体设置变化 - 区分完整重绘和样式重绘
 watch(
   () => ({...poiStore.fontSettings}),
   (newVal, oldVal) => {
@@ -2471,15 +2803,31 @@ watch(
       return;
     }
     
-    // 检查字体相关设置是否变化
-    const fontChanged = 
-      newVal.fontFamily !== oldVal.fontFamily ||
-      newVal.fontWeight !== oldVal.fontWeight ||
+    // 检查是否需要完整重绘（重新定位标签）
+    // 需要完整重绘的情况：语言、序号、字号区间、英文字体库
+    const needsFullRedraw = 
+      newVal.language !== oldVal.language ||
+      newVal.showCityIndex !== oldVal.showCityIndex ||
       newVal.minFontSize !== oldVal.minFontSize ||
-      newVal.maxFontSize !== oldVal.maxFontSize;
+      newVal.maxFontSize !== oldVal.maxFontSize ||
+      (newVal.fontFamily !== oldVal.fontFamily && newVal.language === 'en'); // 英文字体库变化
     
-    if (fontChanged && poiStore.hasDrawing && savedWordCloudLayout) {
-      console.log('字体设置变化，快速重绘词云...');
+    // 检查是否只需要样式重绘（基于原有位置重新绘制样式）
+    // 只需要样式重绘的情况：字重、中文字体库
+    const needsStyleRedraw = 
+      newVal.fontWeight !== oldVal.fontWeight ||
+      (newVal.fontFamily !== oldVal.fontFamily && newVal.language === 'zh'); // 中文字体库变化
+    
+    // 如果需要完整重绘，触发完整重绘（重新定位标签）
+    if (needsFullRedraw && poiStore.hasDrawing) {
+      console.log('字体设置变化（语言/序号/字号区间/英文字体库），触发完整重绘（重新定位标签）...');
+      handleRenderCloud();
+      return;
+    }
+    
+    // 如果只需要样式重绘，基于原有位置重新绘制样式
+    if (needsStyleRedraw && poiStore.hasDrawing && savedWordCloudLayout) {
+      console.log('字体设置变化（字重/中文字体库），快速重绘词云样式...');
       if (wordCloudCtx && wordCloudCanvas) {
         wordCloudCtx.clearRect(0, 0, wordCloudCanvas.width, wordCloudCanvas.height);
         renderWordCloudFromLayout(wordCloudCtx, savedWordCloudLayout, wordCloudCanvas.width, wordCloudCanvas.height);
@@ -2534,12 +2882,16 @@ canvas {
   left: 0;
 }
 
-canvas:first-of-type {
+.voronoi-canvas {
   z-index: 1; /* 维诺图canvas在底层 */
 }
 
-canvas:last-of-type {
-  z-index: 2; /* 词云canvas在上层 */
+.line-canvas {
+  z-index: 2; /* 线条canvas在中间层 */
+}
+
+.wordcloud-canvas {
+  z-index: 3; /* 词云canvas在上层 */
 }
 
 .empty-cloud-hint {
