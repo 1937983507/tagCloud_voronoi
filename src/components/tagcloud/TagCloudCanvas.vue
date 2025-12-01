@@ -7,7 +7,7 @@
           data-intro-target="runTagCloudBtn"
           @click="handleRenderCloud"
         >
-          运行生成加权维诺图
+          运行生成标签云
         </el-button>
         <el-dropdown @command="handleExportCommand">
           <el-button>
@@ -55,8 +55,8 @@
             </svg>
           </div>
           <div class="hint-text">
-            <p class="hint-title">准备生成加权维诺图</p>
-            <p class="hint-desc">请先在地图上绘制折线，然后点击"运行生成加权维诺图"按钮</p>
+            <p class="hint-title">准备生成标签云</p>
+            <p class="hint-desc">请先在地图上绘制折线，然后点击"运行生成标签云"按钮</p>
           </div>
         </div>
       </div>
@@ -71,7 +71,7 @@
           <div class="spinner-dot"></div>
           <div class="spinner-dot"></div>
         </div>
-        <span class="cloud-loading-text">请稍等，正在生成加权维诺图...</span>
+        <span class="cloud-loading-text">请稍等，正在生成标签云...</span>
       </div>
     </div>
   </aside>

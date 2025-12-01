@@ -5,7 +5,7 @@
         <div class="footer-brand">
           <img src="/img/logo.png" alt="Logo" class="footer-logo" />
           <div class="brand-info">
-            <h3 class="brand-name">标签云 TreeMap</h3>
+            <h3 class="brand-name">标签云 Voronoi</h3>
             <p class="brand-desc">专业的地点可视化平台</p>
           </div>
         </div>
