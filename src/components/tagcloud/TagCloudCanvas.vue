@@ -72,7 +72,32 @@
           <div class="spinner-dot"></div>
           <div class="spinner-dot"></div>
         </div>
-        <span class="cloud-loading-text">请稍等，正在生成标签云...</span>
+        <div class="cloud-loading-main-text">
+          请稍等，正在生成标签云…
+        </div>
+        <div class="cloud-loading-sub-text">
+          {{ loadingStage || '正在准备数据与布局，请不要关闭页面。' }}
+        </div>
+        <div
+          v-if="loadingTotalCities > 0"
+          class="cloud-loading-city-text"
+        >
+          当前城市（{{ loadingCurrentIndex }}/{{ loadingTotalCities }}）：
+          <span class="cloud-loading-city-name">
+            {{ loadingCurrentCity || '分析城市中…' }}
+          </span>
+        </div>
+        <div class="cloud-loading-progress-wrapper" v-if="loadingTotalCities > 0">
+          <div class="cloud-loading-progress-bar">
+            <div
+              class="cloud-loading-progress-inner"
+              :style="{ width: loadingPercent + '%' }"
+            ></div>
+          </div>
+          <span class="cloud-loading-progress-text">
+            进度约 {{ loadingPercent }}%
+          </span>
+        </div>
       </div>
     </div>
   </aside>
@@ -99,6 +124,15 @@ const origHeight = ref(600);
 let _aspectRatio = 1;
 
 const poiStore = usePoiStore();
+
+// 小工具：让浏览器有机会渲染一帧，用于更新遮罩上的进度信息
+const waitNextFrame = () => new Promise((resolve) => {
+  if (typeof requestAnimationFrame !== 'undefined') {
+    requestAnimationFrame(() => resolve());
+  } else {
+    setTimeout(resolve, 0);
+  }
+});
 const wrapperRef = ref(null);
 const voronoiCanvasRef = ref(null); // 维诺图canvas
 const wordCloudCanvasRef = ref(null); // 词云canvas
@@ -130,6 +164,17 @@ let savedSites = null; // 保存站点信息（用于绘制线条）：Array<{ci
 
 // loading 遮罩状态
 const cloudLoading = computed(() => poiStore.cloudLoading);
+
+// 遮罩上的友好提示信息
+const loadingStage = ref('');           // 当前阶段文案，例如“正在计算城市权重…”
+const loadingCurrentCity = ref('');     // 当前正在处理的城市
+const loadingCurrentIndex = ref(0);     // 当前城市序号
+const loadingTotalCities = ref(0);      // 总城市数
+const loadingPercent = computed(() => {
+  if (!loadingTotalCities.value || loadingTotalCities.value <= 0) return 0;
+  const ratio = loadingCurrentIndex.value / loadingTotalCities.value;
+  return Math.min(100, Math.max(0, Math.round(ratio * 100)));
+});
 
 const getDrawLineButtonElement = () => {
   return (
@@ -1439,13 +1484,19 @@ const layoutWordCloud = (site, allSites, poiList, regionMap, width, height, ctx,
  * @param {number} height - 画布高度
  * @param {Array} colorIndices - 颜色索引数组（可选，用于确保文字颜色与背景颜色一致）
  */
-const drawWordCloudInRegions = (ctx, collisionCtx, sites, cityOrder, data, width, height, colorIndices = null) => {
+const drawWordCloudInRegions = async (ctx, collisionCtx, sites, cityOrder, data, width, height, colorIndices = null) => {
   if (!currentRegionMap) {
     console.warn('区域映射未生成，无法绘制词云');
     return;
   }
   
   console.log('开始绘制词云...');
+
+  // 初始化遮罩进度信息（按城市粒度）
+  loadingStage.value = '正在为各个城市布局标签…';
+  loadingTotalCities.value = sites.length;
+  loadingCurrentIndex.value = 0;
+  loadingCurrentCity.value = '';
   
   // 清空碰撞检测canvas和缓存
   if (collisionCtx) {
@@ -1459,17 +1510,29 @@ const drawWordCloudInRegions = (ctx, collisionCtx, sites, cityOrder, data, width
   
   // 为每个城市生成词云
   const allWordCloud = [];
-  sites.forEach(site => {
+  for (let siteIndex = 0; siteIndex < sites.length; siteIndex++) {
+    const site = sites[siteIndex];
+
+    // 更新遮罩上的当前城市与进度信息
+    loadingCurrentCity.value = site.city || '';
+    loadingCurrentIndex.value = siteIndex + 1;
+
     const cityPOIs = data[site.city] || [];
     if (cityPOIs.length === 0) {
       console.warn(`城市 ${site.city} 没有POI数据`);
-      return;
+      continue;
     }
     
     const wordCloud = layoutWordCloud(site, sites, cityPOIs, currentRegionMap, width, height, ctx, collisionCtx, cityOrder);
     allWordCloud.push(...wordCloud);
     console.log(`城市 ${site.city}: 放置了 ${wordCloud.length} 个标签`);
-  });
+    
+    // 让出一帧，刷新遮罩显示
+    if (siteIndex % 1 === 0) {
+      await nextTick();
+      await waitNextFrame();
+    }
+  }
   
   // 创建POI到城市的映射（用于快速查找）
   // 使用 city+text 组合作为key，解决重名景点问题
@@ -1800,6 +1863,7 @@ const drawWeightedVoronoi = async (voronoiCanvas, voronoiCtx, wordCloudCanvas, w
   wordCloudCtx.clearRect(0, 0, width, height);
   
   // 设置维诺图画布背景色
+  loadingStage.value = '正在初始化画布与背景…';
   let bgColor;
   if (poiStore.colorSettings.backgroundMode === 'single') {
     bgColor = poiStore.colorSettings.background;
@@ -1819,6 +1883,7 @@ const drawWeightedVoronoi = async (voronoiCanvas, voronoiCtx, wordCloudCanvas, w
   wordCloudCtx.clearRect(0, 0, width, height);
 
   // 加载城市坐标
+  loadingStage.value = '正在加载城市坐标…';
   const cities = await loadCityCoordinates();
   if (!cities || !cities.cities) {
     console.error('无法加载城市坐标数据');
@@ -1826,9 +1891,11 @@ const drawWeightedVoronoi = async (voronoiCanvas, voronoiCtx, wordCloudCanvas, w
   }
 
   // 计算城市权重
+  loadingStage.value = '正在计算城市权重…';
   const cityWeights = calculateCityWeights(data, cityOrder);
   
   // 将经纬度坐标映射到画布空间（初始站点）
+  loadingStage.value = '正在映射城市到画布坐标…';
   const initialSites = mapCoordinatesToCanvas(cities, cityOrder, width, height);
   
   if (initialSites.length === 0) {
@@ -1861,6 +1928,10 @@ const drawWeightedVoronoi = async (voronoiCanvas, voronoiCtx, wordCloudCanvas, w
 
   // 迭代优化循环（使用低分辨率，不生成ImageData）
   for (let iteration = 0; iteration < maxIterations; iteration++) {
+    loadingStage.value = `正在调整城市区域面积（第 ${iteration + 1}/${maxIterations} 轮迭代）…`;
+    // 每轮迭代开始前让浏览器渲染一帧，刷新遮罩内容
+    await nextTick();
+    await waitNextFrame();
     console.log(`\n=== 迭代 ${iteration + 1}/${maxIterations} ===`);
     
     // 生成Voronoi图（低分辨率，不生成ImageData）
@@ -2223,6 +2294,12 @@ const drawWeightedVoronoi = async (voronoiCanvas, voronoiCtx, wordCloudCanvas, w
         }
       }
     }
+
+    // 每处理一部分行，适当让出主线程，确保遮罩有机会更新
+    if (y % (regionMapResolution * 40) === 0) {
+      await nextTick();
+      await waitNextFrame();
+    }
   }
   
   console.log('区域映射生成完成，开始绘制词云...');
@@ -2232,9 +2309,18 @@ const drawWeightedVoronoi = async (voronoiCanvas, voronoiCtx, wordCloudCanvas, w
   
   // 绘制词云到词云canvas（传入碰撞检测canvas的上下文）
   // 传递颜色索引，确保文字颜色与背景颜色一致
-  drawWordCloudInRegions(wordCloudCtx, collisionCtx, finalSites, cityOrder, data, width, height, colorIndices);
+  await drawWordCloudInRegions(
+    wordCloudCtx,
+    collisionCtx,
+    finalSites,
+    cityOrder,
+    data,
+    width,
+    height,
+    colorIndices
+  );
   
-  // 绘制线条
+  // 词云完成后再绘制线条
   drawCityLines();
 };
 
@@ -2243,6 +2329,12 @@ const handleRenderCloud = async () => {
     startDrawGuideIntro();
     return;
   }
+
+  // 初始化遮罩提示状态
+  loadingStage.value = '正在准备数据，请稍候…';
+  loadingCurrentCity.value = '';
+  loadingCurrentIndex.value = 0;
+  loadingTotalCities.value = poiStore.cityOrder.length || 0;
 
   poiStore.setCloudLoading(true);
   // 确保 DOM 更新，让 loading overlay 显示
@@ -2327,6 +2419,11 @@ const handleRenderCloud = async () => {
       await new Promise(resolve => setTimeout(resolve, minDisplayTime - elapsed));
     }
     poiStore.setCloudLoading(false);
+    // 重置遮罩提示
+    loadingStage.value = '';
+    loadingCurrentCity.value = '';
+    loadingCurrentIndex.value = 0;
+    loadingTotalCities.value = 0;
   }
 };
 
@@ -3045,6 +3142,56 @@ canvas {
   margin-top: 8px;
   color: #606266;
   font-size: 16px;
+}
+
+.cloud-loading-main-text {
+  font-size: 18px;
+  font-weight: 600;
+  color: #303133;
+}
+
+.cloud-loading-sub-text {
+  font-size: 14px;
+  color: #666;
+  max-width: 420px;
+  text-align: center;
+}
+
+.cloud-loading-city-text {
+  font-size: 14px;
+  color: #555;
+}
+
+.cloud-loading-city-name {
+  font-weight: 600;
+  color: #409eff;
+}
+
+.cloud-loading-progress-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.cloud-loading-progress-bar {
+  width: 160px;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.05);
+  overflow: hidden;
+}
+
+.cloud-loading-progress-inner {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #409eff, #67c23a);
+  transition: width 0.25s ease-out;
+}
+
+.cloud-loading-progress-text {
+  font-size: 12px;
+  color: #909399;
 }
 </style>
 
