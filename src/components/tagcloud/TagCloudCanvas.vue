@@ -2018,7 +2018,10 @@ const drawWeightedVoronoi = async (voronoiCanvas, voronoiCtx, wordCloudCanvas, w
 
   // 迭代优化循环（使用低分辨率，不生成ImageData）
   for (let iteration = 0; iteration < maxIterations; iteration++) {
-    loadingStage.value = `正在调整城市区域面积（第 ${iteration + 1}/${maxIterations} 轮迭代）…`;
+    loadingStage.value = '正在生成加权Voronoi图…';
+    loadingCurrentCity.value = '';
+    loadingCurrentIndex.value = 0;
+    loadingTotalCities.value = 0;
     // 每轮迭代开始前让浏览器渲染一帧，刷新遮罩内容
     await nextTick();
     await waitNextFrame();
