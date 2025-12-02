@@ -3,6 +3,7 @@ import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
 
 export default defineConfig({
+  base: '/voronoi/',
   plugins: [vue()],
   resolve: {
     alias: {

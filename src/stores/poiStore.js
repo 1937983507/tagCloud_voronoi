@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia';
 import axios from 'axios';
 
-const DATA_URL = '/data/chinapoi.csv';
+const DATA_URL = `${import.meta.env.BASE_URL}data/chinapoi.csv`;
 
 export const usePoiStore = defineStore('poiStore', {
   state: () => ({

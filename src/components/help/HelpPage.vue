@@ -115,6 +115,7 @@ const feedbackGoodText = ref('');
 const preprocessMarkdown = (content) => {
   // 存储图片 scale 信息的映射：src -> scale（存储多种可能的路径格式）
   const imageScaleMap = new Map();
+  const baseUrl = import.meta.env.BASE_URL;
   
   // 匹配图片语法：![alt](url "title") 或 ![alt](url "scale:50%")
   const imageRegex = /!\[([^\]]*)\]\(([^)]+)(?:\s+"([^"]+)")?\)/g;
@@ -131,16 +132,36 @@ const preprocessMarkdown = (content) => {
       if (scaleMatch) {
         const scaleValue = scaleMatch[1] + '%';
         
-        // 存储多种可能的路径格式，以便后续匹配
+        // 存储原始路径
         imageScaleMap.set(url, scaleValue);
         
-        // 如果路径是相对路径，也存储处理后的绝对路径
-        if (url.startsWith('/img/')) {
+        // 处理包含 public 的路径
+        let normalizedUrl = url;
+        if (url.includes('/public/img/')) {
+          normalizedUrl = url.replace(/.*\/public\/img\//, `${baseUrl}img/`);
+          imageScaleMap.set(normalizedUrl, scaleValue);
+        }
+        
+        // 存储多种可能的路径格式，以便后续匹配（包括带 base URL 的路径）
+        if (url.startsWith('../img/') || url.includes('../../../img/')) {
+          const processedUrl = url.replace(/\.\.\/+/g, '').replace(/^img\//, `${baseUrl}img/`);
+          if (!processedUrl.startsWith(baseUrl) && !processedUrl.startsWith('http')) {
+            const finalUrl = `${baseUrl}img/` + processedUrl.replace(/^img\//, '');
+            imageScaleMap.set(finalUrl, scaleValue);
+          } else {
+            imageScaleMap.set(processedUrl, scaleValue);
+          }
+          imageScaleMap.set(url.replace(/\.\.\/+/g, '').replace(/^img\//, '/img/'), scaleValue);
+        } else if (url.startsWith('/img/')) {
+          const processedUrl = baseUrl + url.substring(1);
+          imageScaleMap.set(processedUrl, scaleValue);
           imageScaleMap.set(url, scaleValue);
         } else if (url.startsWith('img/')) {
+          imageScaleMap.set(baseUrl + url, scaleValue);
           imageScaleMap.set('/' + url, scaleValue);
           imageScaleMap.set(url, scaleValue);
-        } else if (!url.startsWith('/') && !url.startsWith('http')) {
+        } else if (!url.startsWith('/') && !url.startsWith('http') && !url.startsWith(baseUrl)) {
+          imageScaleMap.set(`${baseUrl}img/` + url, scaleValue);
           imageScaleMap.set('/img/' + url, scaleValue);
           imageScaleMap.set(url, scaleValue);
         }
@@ -256,14 +277,28 @@ const processMarkdownContent = (html, imageScaleMap = new Map()) => {
         }
       }
       
-      // 处理路径转换
+      // 处理路径转换，确保使用 base URL
       let src = originalSrc;
-      if (src.startsWith('../img/')) {
-        src = src.replace('../img/', '/img/');
+      const baseUrl = import.meta.env.BASE_URL;
+      
+      // 处理包含 public 的路径（从 Markdown 相对路径转换而来）
+      if (src.includes('/public/img/')) {
+        src = src.replace(/.*\/public\/img\//, `${baseUrl}img/`);
+      } else if (src.startsWith('../img/') || src.includes('../../../img/')) {
+        // 处理相对路径，移除所有 ../ 前缀
+        src = src.replace(/\.\.\/+/g, '').replace(/^img\//, `${baseUrl}img/`);
+        if (!src.startsWith(baseUrl) && !src.startsWith('http')) {
+          src = `${baseUrl}img/` + src.replace(/^img\//, '');
+        }
+      } else if (src.startsWith('/img/')) {
+        src = baseUrl + src.substring(1); // 移除开头的 /，然后加上 baseUrl
       } else if (src.startsWith('img/')) {
-        src = '/' + src;
-      } else if (!src.startsWith('/') && !src.startsWith('http')) {
-        src = '/img/' + src;
+        src = baseUrl + src;
+      } else if (!src.startsWith('/') && !src.startsWith('http') && !src.startsWith(baseUrl)) {
+        src = `${baseUrl}img/` + src;
+      } else if (src.startsWith('/') && !src.startsWith(baseUrl) && !src.startsWith('http')) {
+        // 如果是以 / 开头但不是 http，需要加上 baseUrl
+        src = baseUrl + src.substring(1);
       }
       
       // 如果原始路径没找到，尝试用处理后的路径查找
