@@ -25,7 +25,7 @@ const extractJsonFromText = (text) => {
 
 export const loadGeoJson = async () => {
   if (cachedGeojson) return cachedGeojson;
-  const response = await fetch('/data/shi.js');
+  const response = await fetch(`${import.meta.env.BASE_URL}data/shi.js`);
   if (!response.ok) {
     throw new Error(`geojson加载失败：${response.status}`);
   }

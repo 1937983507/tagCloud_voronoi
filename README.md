@@ -8,7 +8,7 @@
 
 本项目已部署在线网站，用户可以直接通过浏览器访问体验完整功能：
 
-🔗 [访问在线网站](https://www.hubutagcloud.cn/voronoi)
+🔗 [访问在线网站](https://www.hubutagcloud.cn/voronoi/)
 
 无需本地下载或安装，即可进行地名标签云的生成、样式调整等交互操作。
 
@@ -169,7 +169,7 @@ tagCloud_voronoi/
 团队成员来自 **地理学、资源与环境、计算机科学与技术** 等相关专业，我们欢迎本科生、研究生及相关科研人员加入，参与前沿研究、项目开发和学术交流。
 
 实验室官网详细介绍请参阅：
-🔗 [湖北大学制图组官网](https://www.hubutagcloud.cn/hubuCartographicGroup)
+🔗 [湖北大学制图组官网](https://www.hubutagcloud.cn/cxq-group/)
 
 ---
 

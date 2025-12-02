@@ -274,7 +274,7 @@ const loadCityCoordinates = async () => {
   if (cityCoordinates) return cityCoordinates;
   
   try {
-    const response = await axios.get('/data/cityCoordinates.json');
+    const response = await axios.get(`${import.meta.env.BASE_URL}data/cityCoordinates.json`);
     cityCoordinates = response.data;
     return cityCoordinates;
   } catch (error) {
