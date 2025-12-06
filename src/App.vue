@@ -2,6 +2,7 @@
   <div class="app-shell">
     <HeaderBar
       ref="headerRef"
+      :show-tutorial-icon="!showHelpPage && !showFeedbackPage"
       @navigate="handleNavigate"
       @start-tutorial="restartIntro"
     />
@@ -125,7 +126,7 @@ const getTutorialButtonElement = () => {
   const tutorialBtn = document.querySelector('[data-intro-tutorial="tutorial-btn"]');
   if (tutorialBtn) return tutorialBtn;
   if (headerRef.value?.$el) {
-    return headerRef.value.$el.querySelector('.nav-actions .el-button:nth-child(3)') || getHeaderElement();
+    return headerRef.value.$el.querySelector('.tutorial-icon-link') || getHeaderElement();
   }
   return getHeaderElement();
 };
@@ -140,7 +141,7 @@ const createIntro = () => {
     {
       element: getHeaderElement(),
       intro:
-        '<div style="line-height:1.6;"><strong style="font-size:16px;color:#1f2333;">导航栏</strong><br/><span style="color:#64748b;">这里可以返回首页、查看帮助或反馈意见。点击<span style="color:#399ceb;">“引导教程”</span>可再次查看本引导。</span></div>',
+        '<div style="line-height:1.6;"><strong style="font-size:16px;color:#1f2333;">导航栏</strong><br/><span style="color:#64748b;">这里可以返回首页、查看帮助或反馈意见。点击右上角的<span style="color:#399ceb;">"引导教程"</span>图标可再次查看本引导。</span></div>',
     },
     {
       element: getSideMenuElement(),
@@ -170,7 +171,7 @@ const createIntro = () => {
     {
       element: getTutorialButtonElement(),
       intro:
-        '<div style="text-align:center;line-height:1.6;"><div style="font-size:20px;margin-bottom:12px;">🎉 引导完成</div><div style="color:#64748b;margin-bottom:12px;">随时点击<span style="color:#399ceb;">“引导教程”</span>按钮重新查看操作提示。</div><div style="font-size:12px;color:#94a3b8;">祝您创作顺利！</div></div>',
+        '<div style="text-align:center;line-height:1.6;"><div style="font-size:20px;margin-bottom:12px;">🎉 引导完成</div><div style="color:#64748b;margin-bottom:12px;">随时点击右上角的<span style="color:#399ceb;">"引导教程"</span>图标重新查看操作提示。</div><div style="font-size:12px;color:#94a3b8;">祝您创作顺利！</div></div>',
     },
   ]);
 
