@@ -12,6 +12,7 @@ export const usePoiStore = defineStore('poiStore', {
     poiList: [],
     allPOI: [], // 存储所有POI数据（原始格式）
     dataLoaded: false,
+    dataLoading: false, // 数据加载状态
     dataLoadingPromise: null,
     visibleMode: 'all',
     selectedIds: [],
@@ -76,6 +77,7 @@ export const usePoiStore = defineStore('poiStore', {
       }
 
       this.dataLoadingPromise = (async () => {
+        this.dataLoading = true;
         try {
           if (DATA_SOURCE === 'json') {
             try {
@@ -93,6 +95,7 @@ export const usePoiStore = defineStore('poiStore', {
           console.error('加载数据失败:', error);
           throw error;
         } finally {
+          this.dataLoading = false;
           this.dataLoadingPromise = null;
         }
       })();
