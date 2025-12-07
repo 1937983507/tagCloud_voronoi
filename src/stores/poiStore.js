@@ -1,13 +1,18 @@
 import { defineStore } from 'pinia';
 import axios from 'axios';
 
-const DATA_URL = `${import.meta.env.BASE_URL}data/chinapoi.csv`;
+// 数据源配置：'json' 使用JSON格式（更快），'csv' 使用CSV格式（备用）
+const DATA_SOURCE = 'json'; // 可以改为 'csv' 切换回CSV模式
+
+const CSV_DATA_URL = `${import.meta.env.BASE_URL}data/chinapoi.csv`;
+const JSON_DATA_URL = `${import.meta.env.BASE_URL}data/chinapoi.json`;
 
 export const usePoiStore = defineStore('poiStore', {
   state: () => ({
     poiList: [],
     allPOI: [], // 存储所有POI数据（原始格式）
     dataLoaded: false,
+    dataLoading: false, // 数据加载状态
     dataLoadingPromise: null,
     visibleMode: 'all',
     selectedIds: [],
@@ -72,81 +77,269 @@ export const usePoiStore = defineStore('poiStore', {
       }
 
       this.dataLoadingPromise = (async () => {
+        this.dataLoading = true;
         try {
-          const response = await axios.get(DATA_URL, {
-            responseType: 'arraybuffer',
-          });
-          const decoderCandidates = ['gb18030', 'gbk', 'utf-8'];
-          let text = null;
-          for (const encoding of decoderCandidates) {
+          if (DATA_SOURCE === 'json') {
             try {
-              text = new TextDecoder(encoding, { fatal: false }).decode(response.data);
-              if (text && text.trim()) {
-                console.info('[poiStore] 使用解码格式', encoding);
-                break;
-              }
-            } catch (decodeError) {
-              console.warn('[poiStore] TextDecoder 无法使用', encoding, decodeError);
+              await this.loadDefaultDataFromJSON();
+            } catch (error) {
+              console.warn('[poiStore] JSON加载失败，尝试使用CSV:', error);
+              // JSON加载失败时，自动回退到CSV
+              await this.loadDefaultDataFromCSV();
             }
+          } else {
+            await this.loadDefaultDataFromCSV();
           }
-          if (!text) {
-            throw new Error('无法解码 POI 数据');
-          }
-          const lines = text.split('\n');
-          this.allPOI = [];
-          this.poiList = [];
-
-          for (let i = 1; i < lines.length; i++) {
-            const currentLine = lines[i].split(',');
-            if (currentLine.length < 6) continue;
-
-            const pname = currentLine[0];
-            const X_gcj02 = parseFloat(currentLine[1]);
-            const Y_gcj02 = parseFloat(currentLine[2]);
-            const city = currentLine[3];
-            const rankInCity = parseInt(currentLine[4]);
-            const rankInChina = parseInt(currentLine[5]);
-            const name_en = currentLine.length >= 7 ? currentLine[6].trim() : ''; // 读取英文名，如果不存在则为空字符串
-
-            const onePOI = {
-              pid: i - 1,
-              pname: pname,
-              name_en: name_en,
-              X_gcj02: X_gcj02,
-              Y_gcj02: Y_gcj02,
-              lnglat: [X_gcj02, Y_gcj02],
-              rankInCity: rankInCity,
-              rankInChina: rankInChina,
-              city: city,
-              selected: false,
-              checked: false,
-              deleted: false,
-            };
-
-            this.allPOI.push(onePOI);
-
-            // 同时添加到poiList（用于兼容）
-            this.poiList.push({
-              id: onePOI.pid,
-              name: onePOI.pname,
-              city: onePOI.city,
-              rank: onePOI.rankInChina,
-              lng: onePOI.X_gcj02,
-              lat: onePOI.Y_gcj02,
-              selected: false,
-            });
-          }
-
           this.dataLoaded = true;
         } catch (error) {
           console.error('加载数据失败:', error);
           throw error;
         } finally {
+          this.dataLoading = false;
           this.dataLoadingPromise = null;
         }
       })();
 
       return this.dataLoadingPromise;
+    },
+
+    /**
+     * 从JSON文件加载数据（推荐，性能更好）
+     * 支持两种格式：
+     * 1. 新格式：{columns: [...], data: [[...], ...]} - 更紧凑
+     * 2. 旧格式：[{id, name, ...}, ...] - 兼容旧数据
+     */
+    async loadDefaultDataFromJSON() {
+      try {
+        console.info('[poiStore] 开始从JSON加载数据...');
+        const startTime = performance.now();
+        
+        const response = await axios.get(JSON_DATA_URL, {
+          responseType: 'json',
+        });
+        
+        const rawData = response.data;
+        
+        // 检测数据格式：新格式（columns+data）或旧格式（数组）
+        if (rawData && typeof rawData === 'object' && 'columns' in rawData && 'data' in rawData) {
+          // 新格式：columns + data数组
+          console.info('[poiStore] 检测到新格式（columns+data），使用优化解析...');
+          await this.loadDefaultDataFromJSONOptimized(rawData);
+        } else if (Array.isArray(rawData)) {
+          // 旧格式：对象数组
+          console.info('[poiStore] 检测到旧格式（对象数组），使用兼容解析...');
+          await this.loadDefaultDataFromJSONLegacy(rawData);
+        } else {
+          throw new Error('JSON数据格式错误：期望columns+data格式或数组格式');
+        }
+        
+        const loadTime = ((performance.now() - startTime) / 1000).toFixed(2);
+        console.info(`[poiStore] JSON数据加载完成，共 ${this.allPOI.length} 条，耗时 ${loadTime} 秒`);
+      } catch (error) {
+        console.error('[poiStore] JSON数据加载失败:', error);
+        throw error;
+      }
+    },
+
+    /**
+     * 从新格式JSON加载数据（columns+data数组格式，更紧凑）
+     */
+    async loadDefaultDataFromJSONOptimized(jsonData) {
+      const { columns, data } = jsonData;
+      
+      if (!Array.isArray(columns) || !Array.isArray(data)) {
+        throw new Error('JSON数据格式错误：columns和data必须是数组');
+      }
+      
+      // 字段索引映射
+      const colIndex = {
+        id: columns.indexOf('id'),
+        name: columns.indexOf('name'),
+        name_en: columns.indexOf('name_en'),
+        city: columns.indexOf('city'),
+        rank: columns.indexOf('rank'),
+        rankInCity: columns.indexOf('rankInCity'),
+        lng: columns.indexOf('lng'),
+        lat: columns.indexOf('lat'),
+      };
+      
+      // 验证必需的字段
+      const requiredFields = ['id', 'name', 'city', 'rank', 'rankInCity', 'lng', 'lat'];
+      for (const field of requiredFields) {
+        if (colIndex[field] === -1) {
+          throw new Error(`JSON数据格式错误：缺少必需字段 "${field}"`);
+        }
+      }
+      
+      // 解析数据数组
+      this.allPOI = [];
+      this.poiList = [];
+      
+      data.forEach((row, index) => {
+        const id = colIndex.id >= 0 && row[colIndex.id] !== undefined ? row[colIndex.id] : index;
+        const pname = colIndex.name >= 0 ? (row[colIndex.name] || '') : '';
+        const name_en = colIndex.name_en >= 0 ? (row[colIndex.name_en] || '') : '';
+        const city = colIndex.city >= 0 ? (row[colIndex.city] || '') : '';
+        const rankInChina = colIndex.rank >= 0 ? (row[colIndex.rank] || 0) : 0;
+        const rankInCity = colIndex.rankInCity >= 0 ? (row[colIndex.rankInCity] || 0) : 0;
+        const X_gcj02 = colIndex.lng >= 0 ? (row[colIndex.lng] || 0) : 0;
+        const Y_gcj02 = colIndex.lat >= 0 ? (row[colIndex.lat] || 0) : 0;
+
+        const onePOI = {
+          pid: id,
+          pname: pname,
+          name_en: name_en,
+          X_gcj02: X_gcj02,
+          Y_gcj02: Y_gcj02,
+          lnglat: [X_gcj02, Y_gcj02],
+          rankInCity: rankInCity,
+          rankInChina: rankInChina,
+          city: city,
+          selected: false,
+          checked: false,
+          deleted: false,
+        };
+
+        this.allPOI.push(onePOI);
+
+        // 同时添加到poiList（用于兼容）
+        this.poiList.push({
+          id: onePOI.pid,
+          name: onePOI.pname,
+          city: onePOI.city,
+          rank: onePOI.rankInChina,
+          lng: onePOI.X_gcj02,
+          lat: onePOI.Y_gcj02,
+          selected: false,
+        });
+      });
+    },
+
+    /**
+     * 从旧格式JSON加载数据（对象数组格式，兼容旧数据）
+     */
+    async loadDefaultDataFromJSONLegacy(rawData) {
+      this.allPOI = [];
+      this.poiList = [];
+      
+      rawData.forEach((item, index) => {
+        const id = item.id !== undefined ? item.id : index;
+        const pname = item.name || '';
+        const name_en = item.name_en || '';
+        const city = item.city || '';
+        const rankInChina = item.rank || 0;
+        const rankInCity = item.rankInCity || 0;
+        const X_gcj02 = item.lng || 0;
+        const Y_gcj02 = item.lat || 0;
+
+        const onePOI = {
+          pid: id,
+          pname: pname,
+          name_en: name_en,
+          X_gcj02: X_gcj02,
+          Y_gcj02: Y_gcj02,
+          lnglat: [X_gcj02, Y_gcj02],
+          rankInCity: rankInCity,
+          rankInChina: rankInChina,
+          city: city,
+          selected: false,
+          checked: false,
+          deleted: false,
+        };
+
+        this.allPOI.push(onePOI);
+
+        // 同时添加到poiList（用于兼容）
+        this.poiList.push({
+          id: onePOI.pid,
+          name: onePOI.pname,
+          city: onePOI.city,
+          rank: onePOI.rankInChina,
+          lng: onePOI.X_gcj02,
+          lat: onePOI.Y_gcj02,
+          selected: false,
+        });
+      });
+    },
+
+    /**
+     * 从CSV文件加载数据（备用方案，保留原有逻辑）
+     */
+    async loadDefaultDataFromCSV() {
+      try {
+        console.info('[poiStore] 开始从CSV加载数据...');
+        const startTime = performance.now();
+        
+        const response = await axios.get(CSV_DATA_URL, {
+          responseType: 'arraybuffer',
+        });
+        const decoderCandidates = ['gb18030', 'gbk', 'utf-8'];
+        let text = null;
+        for (const encoding of decoderCandidates) {
+          try {
+            text = new TextDecoder(encoding, { fatal: false }).decode(response.data);
+            if (text && text.trim()) {
+              console.info('[poiStore] 使用解码格式', encoding);
+              break;
+            }
+          } catch (decodeError) {
+            console.warn('[poiStore] TextDecoder 无法使用', encoding, decodeError);
+          }
+        }
+        if (!text) {
+          throw new Error('无法解码 POI 数据');
+        }
+        const lines = text.split('\n');
+        this.allPOI = [];
+        this.poiList = [];
+
+        for (let i = 1; i < lines.length; i++) {
+          const currentLine = lines[i].split(',');
+          if (currentLine.length < 6) continue;
+
+          const pname = currentLine[0];
+          const X_gcj02 = parseFloat(currentLine[1]);
+          const Y_gcj02 = parseFloat(currentLine[2]);
+          const city = currentLine[3];
+          const rankInCity = parseInt(currentLine[4]);
+          const rankInChina = parseInt(currentLine[5]);
+          const name_en = currentLine.length >= 7 ? currentLine[6].trim() : ''; // 读取英文名，如果不存在则为空字符串
+
+          const onePOI = {
+            pid: i - 1,
+            pname: pname,
+            name_en: name_en,
+            X_gcj02: X_gcj02,
+            Y_gcj02: Y_gcj02,
+            lnglat: [X_gcj02, Y_gcj02],
+            rankInCity: rankInCity,
+            rankInChina: rankInChina,
+            city: city,
+            selected: false,
+            checked: false,
+            deleted: false,
+          };
+
+          this.allPOI.push(onePOI);
+
+          // 同时添加到poiList（用于兼容）
+          this.poiList.push({
+            id: onePOI.pid,
+            name: onePOI.pname,
+            city: onePOI.city,
+            rank: onePOI.rankInChina,
+            lng: onePOI.X_gcj02,
+            lat: onePOI.Y_gcj02,
+            selected: false,
+          });
+        }
+
+        const loadTime = ((performance.now() - startTime) / 1000).toFixed(2);
+        console.info(`[poiStore] CSV数据加载完成，共 ${this.allPOI.length} 条，耗时 ${loadTime} 秒`);
+      } catch (error) {
+        console.error('[poiStore] CSV数据加载失败:', error);
+        throw error;
+      }
     },
     setHasDrawing(hasDrawing) {
       this.hasDrawing = hasDrawing;
