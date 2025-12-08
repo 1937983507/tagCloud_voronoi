@@ -113,6 +113,8 @@ import axios from 'axios';
 import { ElButton, ElSpace, ElDropdown, ElDropdownMenu, ElDropdownItem, ElIcon, ElInputNumber, ElDialog, ElColorPicker, ElCheckbox } from 'element-plus';
 import { ArrowDown } from '@element-plus/icons-vue';
 import { cityNameToPinyin } from '@/utils/cityNameToPinyin';
+import { layoutWordCloudsWithShape } from '@/utils/wordCloudLayoutShape';
+import { updateSitesWithOrderCentroids, setOrderSiteParams, rescueDisconnectedSites, trueCentroidOfRegion, enforceMinAreaWeights, REGION_MIN_PIXELS } from '@/utils/wordCloudMaskUtils';
 
 const exportDialogVisible = ref(false)
 const exportWidth = ref(800)
@@ -166,7 +168,7 @@ let savedSites = null; // 保存站点信息（用于绘制线条）：Array<{ci
 const cloudLoading = computed(() => poiStore.cloudLoading);
 
 // 遮罩上的友好提示信息
-const loadingStage = ref('');           // 当前阶段文案，例如“正在计算城市权重…”
+const loadingStage = ref('');           // 当前阶段文案，例如"正在计算城市权重…"
 const loadingCurrentCity = ref('');     // 当前正在处理的城市
 const loadingCurrentIndex = ref(0);     // 当前城市序号
 const loadingTotalCities = ref(0);      // 总城市数
@@ -214,7 +216,7 @@ const startDrawGuideIntro = () => {
           {
             element: drawBtn,
             intro:
-              '<div style="line-height:1.6;"><strong style="font-size:16px;color:#1f2333;">绘制折线</strong><br/><span style="color:#64748b;">点击此处选择“手绘折线”或“自定义始末点”，划定需要分析的路线。</span></div>',
+              '<div style="line-height:1.6;"><strong style="font-size:16px;color:#1f2333;">绘制折线</strong><br/><span style="color:#64748b;">点击此处选择"手绘折线"或"自定义始末点"，划定需要分析的路线。</span></div>',
           },
           {
             element: mapCanvas,
@@ -1612,6 +1614,121 @@ const drawWordCloudInRegions = async (ctx, collisionCtx, sites, cityOrder, data,
 };
 
 /**
+ * 使用 d3-cloud-shape 算法绘制词云到各个Voronoi子区域（新算法）
+ * @param {CanvasRenderingContext2D} ctx - Canvas上下文（用于测量文字）
+ * @param {CanvasRenderingContext2D} collisionCtx - 碰撞检测canvas的上下文（此算法不需要，但保留接口兼容性）
+ * @param {Array} sites - 站点数组
+ * @param {Array} cityOrder - 城市顺序
+ * @param {Object} data - 编译后的数据（按城市分组）
+ * @param {number} width - 画布宽度
+ * @param {number} height - 画布高度
+ * @param {Array} colorIndices - 颜色索引数组（可选，用于确保文字颜色与背景颜色一致）
+ */
+const drawWordCloudInRegionsWithShape = async (ctx, collisionCtx, sites, cityOrder, data, width, height, colorIndices = null) => {
+  if (!savedRegionPixelMap) {
+    console.warn('区域像素映射未生成，无法使用 d3-cloud-shape 算法绘制词云');
+    // 回退到原有算法
+    return await drawWordCloudInRegions(ctx, collisionCtx, sites, cityOrder, data, width, height, colorIndices);
+  }
+  
+  console.log('开始使用 d3-cloud-shape 算法绘制词云...');
+
+  // 初始化遮罩进度信息（按城市粒度）
+  loadingStage.value = '正在为各个城市布局标签（新算法）…';
+  loadingTotalCities.value = sites.length;
+  loadingCurrentIndex.value = 0;
+  loadingCurrentCity.value = '';
+  
+  // 清空字体测量缓存（每次重新生成时清空）
+  fontMetricsCache.clear();
+  
+  // 获取字体设置
+  const fontSettings = poiStore.fontSettings;
+  
+  // 使用 d3-cloud-shape 算法布局词云
+  const allWordCloud = await layoutWordCloudsWithShape(
+    sites,
+    data,
+    savedRegionPixelMap,
+    width,
+    height,
+    cityOrder,
+    fontSettings,
+    (siteIndex, cityName, placedCount) => {
+      // 进度回调
+      loadingCurrentCity.value = cityName || '';
+      loadingCurrentIndex.value = siteIndex + 1;
+      console.log(`城市 ${cityName}: 放置了 ${placedCount} 个标签`);
+      
+      // 让出一帧，刷新遮罩显示
+      if (siteIndex % 1 === 0) {
+        nextTick().then(() => waitNextFrame());
+      }
+    }
+  );
+  
+  // 创建POI到城市的映射（用于快速查找）
+  const poiToCityMap = new Map();
+  cityOrder.forEach(cityName => {
+    const cityPOIs = data[cityName] || [];
+    cityPOIs.forEach(poi => {
+      const poiCity = poi.city !== undefined ? poi.city : cityName;
+      if (!poiToCityMap.has(poi.text) || poi.city === cityName) {
+        poiToCityMap.set(poi.text, poiCity);
+      }
+    });
+  });
+  
+  // 保存布局信息（用于后续快速重绘）
+  const colorIndicesMap = new Map();
+  if (colorIndices && colorIndices.length === cityOrder.length) {
+    cityOrder.forEach((city, cityIndex) => {
+      colorIndicesMap.set(city, colorIndices[cityIndex]);
+    });
+  } else {
+    console.error('错误：drawWordCloudInRegionsWithShape 未接收到颜色索引，无法确保颜色一致性');
+    cityOrder.forEach((city, cityIndex) => {
+      colorIndicesMap.set(city, cityIndex % poiStore.Colors.length);
+    });
+  }
+  
+  savedWordCloudLayout = {
+    items: allWordCloud.map(item => {
+      let cityName = null;
+      if (item.isCity) {
+        cityName = item.city || item.text;
+      } else {
+        if (item.city) {
+          cityName = item.city;
+        } else {
+          cityName = poiToCityMap.get(item.text);
+        }
+      }
+      
+      return {
+        text: item.text,
+        x: item.x,
+        y: item.y,
+        size: item.size,
+        width: item.width,
+        height: item.height,
+        popularity: item.popularity,
+        isCity: item.isCity,
+        city: cityName
+      };
+    }),
+    sites: sites.map(s => ({ city: s.city, x: s.x, y: s.y })),
+    cityOrder: [...cityOrder],
+    colorIndicesMap: colorIndicesMap
+  };
+  
+  // 绘制词云
+  renderWordCloudFromLayout(ctx, savedWordCloudLayout, width, height);
+  
+  console.log(`词云绘制完成（d3-cloud-shape算法），共绘制 ${allWordCloud.length} 个标签`);
+};
+
+/**
  * 快速更新背景颜色（仅更新颜色，不重新计算区域）
  * @param {CanvasRenderingContext2D} ctx - Canvas上下文
  * @param {number} width - 画布宽度
@@ -1925,16 +2042,33 @@ const relayoutWordCloudOnly = async () => {
     fontMetricsCache.clear();
 
     // 重新根据当前字体设置生成词云
-    await drawWordCloudInRegions(
-      wordCloudCtx,
-      collisionCtx,
-      sites,
-      poiStore.cityOrder,
-      poiStore.compiledData,
-      width,
-      height,
-      savedColorIndices
-    );
+    // 优先使用 d3-cloud-shape 算法，如果失败则回退到原有算法
+    try {
+      console.log('尝试使用 d3-cloud-shape 算法重新布局词云...');
+      await drawWordCloudInRegionsWithShape(
+        wordCloudCtx,
+        collisionCtx,
+        sites,
+        poiStore.cityOrder,
+        poiStore.compiledData,
+        width,
+        height,
+        savedColorIndices
+      );
+      console.log('d3-cloud-shape 算法重新布局完成');
+    } catch (error) {
+      console.warn('d3-cloud-shape 算法重新布局失败，回退到原有算法:', error);
+      await drawWordCloudInRegions(
+        wordCloudCtx,
+        collisionCtx,
+        sites,
+        poiStore.cityOrder,
+        poiStore.compiledData,
+        width,
+        height,
+        savedColorIndices
+      );
+    }
   } finally {
     poiStore.setCloudLoading(false);
     loadingStage.value = '';
@@ -2079,8 +2213,26 @@ const drawWeightedVoronoi = async (voronoiCanvas, voronoiCtx, wordCloudCanvas, w
     
     // 计算形心并更新站点位置（为下一次迭代准备）
     if (iteration < maxIterations - 1) {
-      sitesWithWeights = updateSitesWithCentroids(cityCenters, sitesWithWeights);
-      console.log('已更新站点位置为形心，准备下一次迭代...');
+      // 1. 强制小城市权重增强，避免极小空间（参数可调整）
+      sitesWithWeights = enforceMinAreaWeights(cityPixelCounts, sitesWithWeights, REGION_MIN_PIXELS);
+      // 2. 按顺序保持与形心收敛
+      sitesWithWeights = updateSitesWithOrderCentroids(cityCenters, sitesWithWeights, cityOrder);
+      // 3. 对site应用"视觉感知中心"收敛调整
+      if (typeof regionMasks !== 'undefined' && Array.isArray(regionMasks) && regionMasks.length === sitesWithWeights.length) {
+        sitesWithWeights.forEach((site,i)=>{
+          const maskObj=regionMasks[i];if(maskObj?.mask){
+            const center = trueCentroidOfRegion(maskObj.mask);
+            if(center){site.x=center[0];site.y=center[1];}
+          }
+        });
+      }
+      // 4. 断块连通性修正
+      if (typeof regionMasks !== 'undefined' && Array.isArray(regionMasks) && regionMasks.length === sitesWithWeights.length) {
+        const theta = typeof window !== 'undefined' && window.__RESCUE_THETA !== undefined ? window.__RESCUE_THETA : 1.0;
+        sitesWithWeights = rescueDisconnectedSites(sitesWithWeights, regionMasks, width, height, {theta});
+        console.log('已修正断块不连通站点。theta=', theta);
+      }
+      console.log('已更新站点位置为形心/顺序/连接性/中心感知混合，准备下一次迭代...');
     }
   }
 
@@ -2401,17 +2553,34 @@ const drawWeightedVoronoi = async (voronoiCanvas, voronoiCtx, wordCloudCanvas, w
   savedSites = finalSites.map(s => ({ city: s.city, x: s.x, y: s.y, weight: s.weight }));
   
   // 绘制词云到词云canvas（传入碰撞检测canvas的上下文）
+  // 优先使用 d3-cloud-shape 算法，如果失败则回退到原有算法
   // 传递颜色索引，确保文字颜色与背景颜色一致
-  await drawWordCloudInRegions(
-    wordCloudCtx,
-    collisionCtx,
-    finalSites,
-    cityOrder,
-    data,
-    width,
-    height,
-    colorIndices
-  );
+  try {
+    console.log('尝试使用 d3-cloud-shape 算法绘制词云...');
+    await drawWordCloudInRegionsWithShape(
+      wordCloudCtx,
+      collisionCtx,
+      finalSites,
+      cityOrder,
+      data,
+      width,
+      height,
+      colorIndices
+    );
+    console.log('d3-cloud-shape 算法绘制完成');
+  } catch (error) {
+    console.warn('d3-cloud-shape 算法绘制失败，回退到原有算法:', error);
+    await drawWordCloudInRegions(
+      wordCloudCtx,
+      collisionCtx,
+      finalSites,
+      cityOrder,
+      data,
+      width,
+      height,
+      colorIndices
+    );
+  }
   
   // 词云完成后再绘制线条
   drawCityLines();
@@ -2985,7 +3154,7 @@ watch(
   { deep: true }
 );
 
-// watch字体设置变化 - 区分“仅重新布局词云”和“仅样式重绘”
+// watch字体设置变化 - 区分"仅重新布局词云"和"仅样式重绘"
 watch(
   () => ({...poiStore.fontSettings}),
   async (newVal, oldVal) => {
