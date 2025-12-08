@@ -114,6 +114,7 @@ import { ElButton, ElSpace, ElDropdown, ElDropdownMenu, ElDropdownItem, ElIcon, 
 import { ArrowDown } from '@element-plus/icons-vue';
 import { cityNameToPinyin } from '@/utils/cityNameToPinyin';
 import { layoutWordCloudsWithShape } from '@/utils/wordCloudLayoutShape';
+import { updateSitesWithOrderCentroids, setOrderSiteParams, rescueDisconnectedSites, trueCentroidOfRegion, enforceMinAreaWeights, REGION_MIN_PIXELS } from '@/utils/wordCloudMaskUtils';
 
 const exportDialogVisible = ref(false)
 const exportWidth = ref(800)
@@ -167,7 +168,7 @@ let savedSites = null; // 保存站点信息（用于绘制线条）：Array<{ci
 const cloudLoading = computed(() => poiStore.cloudLoading);
 
 // 遮罩上的友好提示信息
-const loadingStage = ref('');           // 当前阶段文案，例如“正在计算城市权重…”
+const loadingStage = ref('');           // 当前阶段文案，例如"正在计算城市权重…"
 const loadingCurrentCity = ref('');     // 当前正在处理的城市
 const loadingCurrentIndex = ref(0);     // 当前城市序号
 const loadingTotalCities = ref(0);      // 总城市数
@@ -215,7 +216,7 @@ const startDrawGuideIntro = () => {
           {
             element: drawBtn,
             intro:
-              '<div style="line-height:1.6;"><strong style="font-size:16px;color:#1f2333;">绘制折线</strong><br/><span style="color:#64748b;">点击此处选择“手绘折线”或“自定义始末点”，划定需要分析的路线。</span></div>',
+              '<div style="line-height:1.6;"><strong style="font-size:16px;color:#1f2333;">绘制折线</strong><br/><span style="color:#64748b;">点击此处选择"手绘折线"或"自定义始末点"，划定需要分析的路线。</span></div>',
           },
           {
             element: mapCanvas,
@@ -2212,8 +2213,26 @@ const drawWeightedVoronoi = async (voronoiCanvas, voronoiCtx, wordCloudCanvas, w
     
     // 计算形心并更新站点位置（为下一次迭代准备）
     if (iteration < maxIterations - 1) {
-      sitesWithWeights = updateSitesWithCentroids(cityCenters, sitesWithWeights);
-      console.log('已更新站点位置为形心，准备下一次迭代...');
+      // 1. 强制小城市权重增强，避免极小空间（参数可调整）
+      sitesWithWeights = enforceMinAreaWeights(cityPixelCounts, sitesWithWeights, REGION_MIN_PIXELS);
+      // 2. 按顺序保持与形心收敛
+      sitesWithWeights = updateSitesWithOrderCentroids(cityCenters, sitesWithWeights, cityOrder);
+      // 3. 对site应用"视觉感知中心"收敛调整
+      if (typeof regionMasks !== 'undefined' && Array.isArray(regionMasks) && regionMasks.length === sitesWithWeights.length) {
+        sitesWithWeights.forEach((site,i)=>{
+          const maskObj=regionMasks[i];if(maskObj?.mask){
+            const center = trueCentroidOfRegion(maskObj.mask);
+            if(center){site.x=center[0];site.y=center[1];}
+          }
+        });
+      }
+      // 4. 断块连通性修正
+      if (typeof regionMasks !== 'undefined' && Array.isArray(regionMasks) && regionMasks.length === sitesWithWeights.length) {
+        const theta = typeof window !== 'undefined' && window.__RESCUE_THETA !== undefined ? window.__RESCUE_THETA : 1.0;
+        sitesWithWeights = rescueDisconnectedSites(sitesWithWeights, regionMasks, width, height, {theta});
+        console.log('已修正断块不连通站点。theta=', theta);
+      }
+      console.log('已更新站点位置为形心/顺序/连接性/中心感知混合，准备下一次迭代...');
     }
   }
 
@@ -3135,7 +3154,7 @@ watch(
   { deep: true }
 );
 
-// watch字体设置变化 - 区分“仅重新布局词云”和“仅样式重绘”
+// watch字体设置变化 - 区分"仅重新布局词云"和"仅样式重绘"
 watch(
   () => ({...poiStore.fontSettings}),
   async (newVal, oldVal) => {

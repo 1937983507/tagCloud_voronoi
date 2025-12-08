@@ -194,3 +194,126 @@ export function convertPOIsToWords(poiList, options = {}) {
   return words;
 }
 
+// ⚡️顺序保持与形心混合的城市站点位置更新
+export let ORDER_ALPHA = 0.8; // 形心收敛权重（默认0.7）
+export let ORDER_BETA  = 0.2; // 顺序邻接保持权重（默认0.3）
+export let ORDER_NEIGHBOR = 1; // 相邻层级（默认前后1个城市，可设为2即前2后2都算邻居）
+
+/**
+ * 结合面积形心与相邻排序拉力的城市site点位置更新（实验性）
+ * @param {Map} cityCenters - 城市形心数据
+ * @param {Array} sites - 当前站点数组（含city/x/y/weight）
+ * @param {Array} cityOrder - 顺序（与sites顺序应严格一致）
+ * @returns {Array} 更适合顺序连续性的下一步sites
+ */
+export function updateSitesWithOrderCentroids(cityCenters, sites, cityOrder) {
+  return sites.map((site, i) => {
+    // 形心力：area收敛
+    const centroid = cityCenters.get(site.city) || { x: site.x, y: site.y, count: 1 };
+    const cx = centroid.count > 0 ? centroid.x / centroid.count : site.x;
+    const cy = centroid.count > 0 ? centroid.y / centroid.count : site.y;
+    // 顺序邻接力：取ORDER_NEIGHBOR阶前后N个城市点平均
+    let nx = 0, ny = 0, nCount = 0;
+    for (let k = 1; k <= ORDER_NEIGHBOR; k++) {
+      if (i - k >= 0)   { nx += sites[i-k].x; ny += sites[i-k].y; nCount++; }
+      if (i + k < sites.length) { nx += sites[i+k].x; ny += sites[i+k].y; nCount++; }
+    }
+    if (nCount) { nx /= nCount; ny /= nCount; } else { nx = cx; ny = cy; }
+    // 合并
+    const x = ORDER_ALPHA * cx + ORDER_BETA * nx;
+    const y = ORDER_ALPHA * cy + ORDER_BETA * ny;
+    return { ...site, x, y };
+  });
+}
+
+/**
+ * 计算给定mask(二维array)的所有连通块(以4连通)返回块的像素[[x,y],...]/块数组
+ */
+export function findConnectedComponents2D(mask) {
+  const height = mask.length, width = mask[0]?.length || 0;
+  const visited = Array.from({length:height},()=>Array(width).fill(false));
+  const comps = [], dirs=[[1,0],[-1,0],[0,1],[0,-1]];
+  function flood(sx,sy) {
+    const q=[[sx,sy]], blk=[[sx,sy]]; visited[sy][sx]=true;
+    while(q.length) {
+      const [x,y]=q.shift();
+      for(const[dX,dY] of dirs){ const nx=x+dX,ny=y+dY;
+      if(nx>=0&&ny>=0&&nx<width&&ny<height&&mask[ny][nx]&&!visited[ny][nx]){visited[ny][nx]=true;q.push([nx,ny]);blk.push([nx,ny]);}}
+    } return blk;
+  }
+  for(let y=0;y<height;y++)for(let x=0;x<width;x++)if(mask[y][x]&&!visited[y][x])comps.push(flood(x,y));
+  return comps;
+}
+
+/**
+ * 计算多个pixels块的各自质心
+ */
+export function regionCentroids(components) {
+  return components.map(block=>{
+    let sx=0,sy=0; block.forEach(([x,y])=>(sx+=x,sy+=y));
+    return [sx/block.length,sy/block.length];
+  });
+}
+
+/**
+ * 断块site移动算法：如有多个连通块则site移到最大块质心，默认theta=1.0强制snap
+ */
+export function rescueDisconnectedSites(sites, regionMasks, width, height, {theta=1.0}={}) {
+  // regionMasks: Array<{mask:Array2D, width, height}>,与sites顺序严格一致
+  sites.forEach((site,i)=>{
+    const mask = regionMasks[i]?.mask; if(!mask) return;
+    const comps = findConnectedComponents2D(mask);
+    if(comps.length>1){
+      // 找面积最大块
+      let maxIdx=0;
+      comps.forEach((blk,idx)=>{if(blk.length>comps[maxIdx].length)maxIdx=idx;});
+      const [mainX,mainY]=regionCentroids([comps[maxIdx]])[0];
+      site.x = site.x*(1-theta)+mainX*theta;
+      site.y = site.y*(1-theta)+mainY*theta;
+      site.__disconnected = true;
+    }else{
+      site.__disconnected = false;
+    }
+  });
+  return sites;
+}
+
+/**
+ * 寻找mask的“视觉感知上中央”：最小外接矩形内，选取到mask像素组所有点距离总和最小的像素
+ * 输入mask: [row][col] 二值二维array
+ * 返回 [cx,cy] 视觉中心，若为空则null
+ */
+export function trueCentroidOfRegion(mask) {
+  const h=mask.length, w=mask[0]?.length||0, points=[];
+  for(let y=0;y<h;y++)for(let x=0;x<w;x++)if(mask[y][x])points.push([x,y]);
+  if(!points.length) return null;
+  // 外接框
+  let minX = Math.min(...points.map(p=>p[0])), maxX = Math.max(...points.map(p=>p[0]));
+  let minY = Math.min(...points.map(p=>p[1])), maxY = Math.max(...points.map(p=>p[1]));
+  let bestP = points[0], bestSum = Infinity;
+  for (let y=minY; y<=maxY; y++) for (let x=minX; x<=maxX; x++) {
+    let sum = 0; for (let [px, py] of points) sum += Math.abs(px-x)+Math.abs(py-y);
+    if (sum < bestSum) {bestSum=sum; bestP=[x,y];}
+  }
+  return bestP;
+}
+
+// 最小面积强制权重增强
+export let REGION_MIN_PIXELS = 2000;
+export function enforceMinAreaWeights(cityPixelCounts, sitesWithWeights, minPixels=REGION_MIN_PIXELS) {
+  // cityPixelCounts: Map<city, 像素数>
+  // sitesWithWeights: Array<{city,weight,x,y,...}>
+  sitesWithWeights.forEach(site => {
+    const area = cityPixelCounts.get(site.city)||0;
+    if(area<minPixels) site.weight *= 1 + Math.min(2, (minPixels-area)/minPixels); // 权重至多翻倍
+  });
+  return sitesWithWeights;
+}
+
+// 可供用户或配置面板动态调整
+export function setOrderSiteParams({ alpha, beta, neighbor }) {
+  if (typeof alpha === 'number')   ORDER_ALPHA = alpha;
+  if (typeof beta === 'number')    ORDER_BETA  = beta;
+  if (typeof neighbor === 'number') ORDER_NEIGHBOR = Math.max(1, Math.round(neighbor));
+}
+

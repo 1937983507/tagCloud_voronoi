@@ -115,7 +115,7 @@ export function layoutWordCloudWithShape(site, poiList, regionPixelMap, width, h
     const layout = d3CloudShape()
       .size([maskWidth, maskHeight])  // 使用掩膜的尺寸
       .words(words)
-      .padding(2)
+      .padding(1)
       .rotate(() => 0)  // 不旋转
       .font(fontFamily)
       .fontWeight(fontWeight)
