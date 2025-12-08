@@ -113,6 +113,7 @@ import axios from 'axios';
 import { ElButton, ElSpace, ElDropdown, ElDropdownMenu, ElDropdownItem, ElIcon, ElInputNumber, ElDialog, ElColorPicker, ElCheckbox } from 'element-plus';
 import { ArrowDown } from '@element-plus/icons-vue';
 import { cityNameToPinyin } from '@/utils/cityNameToPinyin';
+import { layoutWordCloudsWithShape } from '@/utils/wordCloudLayoutShape';
 
 const exportDialogVisible = ref(false)
 const exportWidth = ref(800)
@@ -1612,6 +1613,121 @@ const drawWordCloudInRegions = async (ctx, collisionCtx, sites, cityOrder, data,
 };
 
 /**
+ * 使用 d3-cloud-shape 算法绘制词云到各个Voronoi子区域（新算法）
+ * @param {CanvasRenderingContext2D} ctx - Canvas上下文（用于测量文字）
+ * @param {CanvasRenderingContext2D} collisionCtx - 碰撞检测canvas的上下文（此算法不需要，但保留接口兼容性）
+ * @param {Array} sites - 站点数组
+ * @param {Array} cityOrder - 城市顺序
+ * @param {Object} data - 编译后的数据（按城市分组）
+ * @param {number} width - 画布宽度
+ * @param {number} height - 画布高度
+ * @param {Array} colorIndices - 颜色索引数组（可选，用于确保文字颜色与背景颜色一致）
+ */
+const drawWordCloudInRegionsWithShape = async (ctx, collisionCtx, sites, cityOrder, data, width, height, colorIndices = null) => {
+  if (!savedRegionPixelMap) {
+    console.warn('区域像素映射未生成，无法使用 d3-cloud-shape 算法绘制词云');
+    // 回退到原有算法
+    return await drawWordCloudInRegions(ctx, collisionCtx, sites, cityOrder, data, width, height, colorIndices);
+  }
+  
+  console.log('开始使用 d3-cloud-shape 算法绘制词云...');
+
+  // 初始化遮罩进度信息（按城市粒度）
+  loadingStage.value = '正在为各个城市布局标签（新算法）…';
+  loadingTotalCities.value = sites.length;
+  loadingCurrentIndex.value = 0;
+  loadingCurrentCity.value = '';
+  
+  // 清空字体测量缓存（每次重新生成时清空）
+  fontMetricsCache.clear();
+  
+  // 获取字体设置
+  const fontSettings = poiStore.fontSettings;
+  
+  // 使用 d3-cloud-shape 算法布局词云
+  const allWordCloud = await layoutWordCloudsWithShape(
+    sites,
+    data,
+    savedRegionPixelMap,
+    width,
+    height,
+    cityOrder,
+    fontSettings,
+    (siteIndex, cityName, placedCount) => {
+      // 进度回调
+      loadingCurrentCity.value = cityName || '';
+      loadingCurrentIndex.value = siteIndex + 1;
+      console.log(`城市 ${cityName}: 放置了 ${placedCount} 个标签`);
+      
+      // 让出一帧，刷新遮罩显示
+      if (siteIndex % 1 === 0) {
+        nextTick().then(() => waitNextFrame());
+      }
+    }
+  );
+  
+  // 创建POI到城市的映射（用于快速查找）
+  const poiToCityMap = new Map();
+  cityOrder.forEach(cityName => {
+    const cityPOIs = data[cityName] || [];
+    cityPOIs.forEach(poi => {
+      const poiCity = poi.city !== undefined ? poi.city : cityName;
+      if (!poiToCityMap.has(poi.text) || poi.city === cityName) {
+        poiToCityMap.set(poi.text, poiCity);
+      }
+    });
+  });
+  
+  // 保存布局信息（用于后续快速重绘）
+  const colorIndicesMap = new Map();
+  if (colorIndices && colorIndices.length === cityOrder.length) {
+    cityOrder.forEach((city, cityIndex) => {
+      colorIndicesMap.set(city, colorIndices[cityIndex]);
+    });
+  } else {
+    console.error('错误：drawWordCloudInRegionsWithShape 未接收到颜色索引，无法确保颜色一致性');
+    cityOrder.forEach((city, cityIndex) => {
+      colorIndicesMap.set(city, cityIndex % poiStore.Colors.length);
+    });
+  }
+  
+  savedWordCloudLayout = {
+    items: allWordCloud.map(item => {
+      let cityName = null;
+      if (item.isCity) {
+        cityName = item.city || item.text;
+      } else {
+        if (item.city) {
+          cityName = item.city;
+        } else {
+          cityName = poiToCityMap.get(item.text);
+        }
+      }
+      
+      return {
+        text: item.text,
+        x: item.x,
+        y: item.y,
+        size: item.size,
+        width: item.width,
+        height: item.height,
+        popularity: item.popularity,
+        isCity: item.isCity,
+        city: cityName
+      };
+    }),
+    sites: sites.map(s => ({ city: s.city, x: s.x, y: s.y })),
+    cityOrder: [...cityOrder],
+    colorIndicesMap: colorIndicesMap
+  };
+  
+  // 绘制词云
+  renderWordCloudFromLayout(ctx, savedWordCloudLayout, width, height);
+  
+  console.log(`词云绘制完成（d3-cloud-shape算法），共绘制 ${allWordCloud.length} 个标签`);
+};
+
+/**
  * 快速更新背景颜色（仅更新颜色，不重新计算区域）
  * @param {CanvasRenderingContext2D} ctx - Canvas上下文
  * @param {number} width - 画布宽度
@@ -1925,16 +2041,33 @@ const relayoutWordCloudOnly = async () => {
     fontMetricsCache.clear();
 
     // 重新根据当前字体设置生成词云
-    await drawWordCloudInRegions(
-      wordCloudCtx,
-      collisionCtx,
-      sites,
-      poiStore.cityOrder,
-      poiStore.compiledData,
-      width,
-      height,
-      savedColorIndices
-    );
+    // 优先使用 d3-cloud-shape 算法，如果失败则回退到原有算法
+    try {
+      console.log('尝试使用 d3-cloud-shape 算法重新布局词云...');
+      await drawWordCloudInRegionsWithShape(
+        wordCloudCtx,
+        collisionCtx,
+        sites,
+        poiStore.cityOrder,
+        poiStore.compiledData,
+        width,
+        height,
+        savedColorIndices
+      );
+      console.log('d3-cloud-shape 算法重新布局完成');
+    } catch (error) {
+      console.warn('d3-cloud-shape 算法重新布局失败，回退到原有算法:', error);
+      await drawWordCloudInRegions(
+        wordCloudCtx,
+        collisionCtx,
+        sites,
+        poiStore.cityOrder,
+        poiStore.compiledData,
+        width,
+        height,
+        savedColorIndices
+      );
+    }
   } finally {
     poiStore.setCloudLoading(false);
     loadingStage.value = '';
@@ -2401,17 +2534,34 @@ const drawWeightedVoronoi = async (voronoiCanvas, voronoiCtx, wordCloudCanvas, w
   savedSites = finalSites.map(s => ({ city: s.city, x: s.x, y: s.y, weight: s.weight }));
   
   // 绘制词云到词云canvas（传入碰撞检测canvas的上下文）
+  // 优先使用 d3-cloud-shape 算法，如果失败则回退到原有算法
   // 传递颜色索引，确保文字颜色与背景颜色一致
-  await drawWordCloudInRegions(
-    wordCloudCtx,
-    collisionCtx,
-    finalSites,
-    cityOrder,
-    data,
-    width,
-    height,
-    colorIndices
-  );
+  try {
+    console.log('尝试使用 d3-cloud-shape 算法绘制词云...');
+    await drawWordCloudInRegionsWithShape(
+      wordCloudCtx,
+      collisionCtx,
+      finalSites,
+      cityOrder,
+      data,
+      width,
+      height,
+      colorIndices
+    );
+    console.log('d3-cloud-shape 算法绘制完成');
+  } catch (error) {
+    console.warn('d3-cloud-shape 算法绘制失败，回退到原有算法:', error);
+    await drawWordCloudInRegions(
+      wordCloudCtx,
+      collisionCtx,
+      finalSites,
+      cityOrder,
+      data,
+      width,
+      height,
+      colorIndices
+    );
+  }
   
   // 词云完成后再绘制线条
   drawCityLines();
