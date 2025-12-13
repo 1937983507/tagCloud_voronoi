@@ -2790,10 +2790,102 @@ const drawCityLines = () => {
       }
     }
   } else {
-    // 绘制折线
-    lineCtx.moveTo(points[0].x, points[0].y);
-    for (let i = 1; i < points.length; i++) {
-      lineCtx.lineTo(points[i].x, points[i].y);
+    // 绘制折线（优化版：连接处使用弧形）
+    const shrinkRatio = 0.15; // 缩进比例
+    
+    if (points.length === 2) {
+      // 只有两个点，直接连接
+      lineCtx.moveTo(points[0].x, points[0].y);
+      lineCtx.lineTo(points[1].x, points[1].y);
+    } else {
+      // 多个点，使用圆角折线
+      // 计算每个顶点处的缩进点
+      const shrunkPoints = [];
+      
+      for (let i = 0; i < points.length; i++) {
+        if (i === 0) {
+          // 第一个点：不缩进，直接使用
+          shrunkPoints.push({
+            point: points[0],
+            vertex: null
+          });
+        } else if (i === points.length - 1) {
+          // 最后一个点：不缩进，直接使用
+          shrunkPoints.push({
+            point: points[i],
+            vertex: null
+          });
+        } else {
+          // 中间点：计算前后两段的缩进点
+          const prev = points[i - 1];
+          const curr = points[i];
+          const next = points[i + 1];
+          
+          // 前一段的方向和距离
+          const dx1 = curr.x - prev.x;
+          const dy1 = curr.y - prev.y;
+          const dist1 = Math.sqrt(dx1 * dx1 + dy1 * dy1);
+          
+          // 后一段的方向和距离
+          const dx2 = next.x - curr.x;
+          const dy2 = next.y - curr.y;
+          const dist2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+          
+          if (dist1 > 0 && dist2 > 0) {
+            const unitX1 = dx1 / dist1;
+            const unitY1 = dy1 / dist1;
+            const unitX2 = dx2 / dist2;
+            const unitY2 = dy2 / dist2;
+            
+            const shrinkDist1 = dist1 * shrinkRatio;
+            const shrinkDist2 = dist2 * shrinkRatio;
+            
+            // 前一段的缩进点（从顶点往回缩）
+            const shrinkPointBefore = {
+              x: curr.x - unitX1 * shrinkDist1,
+              y: curr.y - unitY1 * shrinkDist1
+            };
+            
+            // 后一段的缩进点（从顶点往前缩）
+            const shrinkPointAfter = {
+              x: curr.x + unitX2 * shrinkDist2,
+              y: curr.y + unitY2 * shrinkDist2
+            };
+            
+            // 存储前一个缩进点
+            shrunkPoints.push({
+              point: shrinkPointBefore,
+              vertex: null
+            });
+            
+            // 存储顶点信息（用于贝塞尔曲线）
+            shrunkPoints.push({
+              point: shrinkPointAfter,
+              vertex: curr // 原始顶点作为控制点
+            });
+          } else {
+            shrunkPoints.push({ point: curr, vertex: null });
+          }
+        }
+      }
+      
+      // 绘制路径
+      lineCtx.moveTo(shrunkPoints[0].point.x, shrunkPoints[0].point.y);
+      
+      for (let i = 1; i < shrunkPoints.length; i++) {
+        const current = shrunkPoints[i];
+        
+        if (current.vertex) {
+          // 使用二次贝塞尔曲线连接，控制点为原始顶点
+          lineCtx.quadraticCurveTo(
+            current.vertex.x, current.vertex.y,
+            current.point.x, current.point.y
+          );
+        } else {
+          // 直线连接
+          lineCtx.lineTo(current.point.x, current.point.y);
+        }
+      }
     }
   }
   

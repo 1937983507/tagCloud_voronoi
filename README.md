@@ -80,7 +80,7 @@ tagCloud_voronoi/
    npm run dev
    ```
 
-   - 默认启动在 `http://localhost:5176`
+   - 默认启动在 `http://localhost:5176/voronoi/`
    - 支持 Vite HMR，适合快速迭代前端面板
 
 4. **生产构建 / 预览**
