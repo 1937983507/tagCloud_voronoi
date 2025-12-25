@@ -47,6 +47,7 @@ import SplitterBar from '@/components/common/SplitterBar.vue';
 import LinePanel from '@/components/line/LinePanel.vue';
 import FeedbackPage from '@/components/feedback/FeedbackPage.vue';
 import HelpPage from '@/components/help/HelpPage.vue';
+import { recordPageVisit } from '@/utils/statistics';
 
 const activePanel = ref('content');
 const headerRef = ref(null);
@@ -462,7 +463,18 @@ const initIntro = () => {
   });
 };
 
-onMounted(() => {
+onMounted(async () => {
+  // 记录页面访问，等待完成后触发事件通知 FooterBar 更新
+  try {
+    await recordPageVisit();
+    // 触发自定义事件，通知 FooterBar 访问已记录，可以更新统计数据
+    window.dispatchEvent(new CustomEvent('page-visit-recorded'));
+  } catch (error) {
+    console.warn('记录页面访问失败:', error);
+    // 即使失败也触发事件，让 FooterBar 可以加载现有数据
+    window.dispatchEvent(new CustomEvent('page-visit-recorded'));
+  }
+  
   setTimeout(() => {
     if (!showHelpPage.value && !showFeedbackPage.value) {
       initIntro();

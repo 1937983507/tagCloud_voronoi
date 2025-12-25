@@ -115,6 +115,7 @@ import { ArrowDown } from '@element-plus/icons-vue';
 import { cityNameToPinyin } from '@/utils/cityNameToPinyin';
 import { layoutWordCloudsWithShape } from '@/utils/wordCloudLayoutShape';
 import { updateSitesWithOrderCentroids, setOrderSiteParams, rescueDisconnectedSites, trueCentroidOfRegion, enforceMinAreaWeights, REGION_MIN_PIXELS } from '@/utils/wordCloudMaskUtils';
+import { recordTagCloudGeneration } from '@/utils/statistics';
 
 const exportDialogVisible = ref(false)
 const exportWidth = ref(800)
@@ -2674,6 +2675,15 @@ const handleRenderCloud = async () => {
     
     // 绘制加权Voronoi图和词云
     await drawWeightedVoronoi(voronoiCanvas, voronoiCtx, wordCloudCanvas, wordCloudCtx, data, cityOrder, width, height);
+    
+    // 记录词云生成（包括重绘）
+    try {
+      await recordTagCloudGeneration('voronoi');
+      // 触发事件通知 FooterBar 更新统计数据
+      window.dispatchEvent(new CustomEvent('tagcloud-generated'));
+    } catch (error) {
+      console.warn('记录词云生成失败:', error);
+    }
   } finally {
     // 确保 loading 至少显示最小时间
     const elapsed = Date.now() - startTime;
