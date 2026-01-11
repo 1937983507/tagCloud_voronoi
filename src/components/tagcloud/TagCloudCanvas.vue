@@ -46,7 +46,7 @@
       <canvas ref="voronoiCanvasRef" class="voronoi-canvas"></canvas>
       <canvas ref="lineCanvasRef" class="line-canvas"></canvas>
       <canvas ref="wordCloudCanvasRef" class="wordcloud-canvas"></canvas>
-      <div v-if="(!poiStore.hasDrawing || !poiStore.cityOrder.length) && !cloudLoading" class="empty-cloud-hint">
+      <div v-if="showHintOverlay && !cloudLoading" class="empty-cloud-hint">
         <div class="hint-content">
           <div class="hint-icon">
             <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -57,7 +57,11 @@
           </div>
           <div class="hint-text">
             <p class="hint-title">准备生成标签云</p>
-            <p class="hint-desc">请先在地图上绘制折线，然后点击"运行生成标签云"按钮</p>
+            <p class="hint-desc">
+              {{ (!poiStore.hasDrawing || !poiStore.cityOrder.length) 
+                ? '请先在地图上绘制折线，然后点击"运行生成标签云"按钮' 
+                : '请单击"运行生成标签云"' }}
+            </p>
           </div>
         </div>
       </div>
@@ -190,6 +194,9 @@ let savedSites = null; // 保存站点信息（用于绘制线条）：Array<{ci
 
 // loading 遮罩状态
 const cloudLoading = computed(() => poiStore.cloudLoading);
+
+// 提示遮罩显示状态（在用户点击"运行生成标签云"之前一直显示）
+const showHintOverlay = ref(true);
 
 // 遮罩上的友好提示信息
 const loadingMode = ref('voronoi');     // 遮罩模式：'voronoi' 计算加权维诺图，'wordcloud' 计算词云
@@ -1820,6 +1827,9 @@ const handleRenderCloud = async () => {
       return;
     }
     
+    // 隐藏提示遮罩（用户已点击"运行生成标签云"按钮）
+    showHintOverlay.value = false;
+    
     // 设置loading状态
     poiStore.setCloudLoading(true);
     // 设置初始模式为加权维诺图模式
@@ -2431,6 +2441,17 @@ watch(
   () => Object.keys(poiStore.compiledData || {}).length,
   (length) => {
     console.info('[TagCloudCanvas] compiledData 键数量', length);
+  }
+);
+
+// 监听绘制状态变化，当绘制被清除时重新显示提示遮罩
+watch(
+  () => poiStore.hasDrawing,
+  (hasDrawing) => {
+    if (!hasDrawing) {
+      // 绘制被清除，重新显示提示遮罩
+      showHintOverlay.value = true;
+    }
   }
 );
 
