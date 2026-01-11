@@ -789,17 +789,15 @@ const fastUpdateBackgroundColors = (ctx, width, height, cityOrder, forceRecalcul
 };
 
 /**
- * 绘制加权维诺图到canvas
- * @param {CanvasRenderingContext2D} ctx - canvas上下文
+ * 计算加权维诺图区域映射（不绘制，仅计算）
  * @param {Array} sitesWithWeights - 站点数组（包含x, y, weight, city）
  * @param {Array} cityOrder - 城市顺序
  * @param {number} width - 画布宽度
  * @param {number} height - 画布高度
- * @param {Array} colors - 颜色数组 [{r, g, b, a}, ...]
  * @param {number} resolution - 分辨率步长（默认2，值越小越精确但越慢）
  * @returns {Uint8Array} 区域像素映射，每个像素存储城市索引
  */
-const drawWeightedVoronoi = async (ctx, sitesWithWeights, cityOrder, width, height, colors, resolution = 2) => {
+const computeWeightedVoronoiMap = async (sitesWithWeights, cityOrder, width, height, resolution = 2) => {
   // 创建城市索引映射
   const cityIndexMap = new Map();
   cityOrder.forEach((city, index) => {
@@ -808,55 +806,45 @@ const drawWeightedVoronoi = async (ctx, sitesWithWeights, cityOrder, width, heig
 
   // 创建区域像素映射（用于快速更新背景颜色）
   const regionPixelMap = new Uint8Array(width * height);
-  
-  // 创建ImageData用于批量绘制
-  const imageData = ctx.createImageData(width, height);
-  const data = imageData.data;
 
-  // 计算每个像素属于哪个区域并填充颜色
+  // 计算每个像素属于哪个区域（使用距离平方避免平方根运算）
   for (let y = 0; y < height; y += resolution) {
     for (let x = 0; x < width; x += resolution) {
-      let minDist = Infinity;
+      let minWeightedDistSq = Infinity;
       let closestSite = null;
       
-      // 找到最近的站点（基于加权距离）
+      // 找到最近的站点（基于加权距离平方）
       for (const site of sitesWithWeights) {
         const dx = x - site.x;
         const dy = y - site.y;
-        const euclideanDist = Math.sqrt(dx * dx + dy * dy);
+        const euclideanDistSq = dx * dx + dy * dy;
         
-        if (euclideanDist === 0) {
+        if (euclideanDistSq === 0) {
           closestSite = site;
           break;
         }
         
         const weight = Math.max(site.weight || 0.00001, 0.00001);
-        // 加权距离：距离除以权重的平方根
-        const weightedDist = euclideanDist / Math.sqrt(weight);
+        // 加权距离平方：欧氏距离平方除以权重
+        // 注意：加权距离 = 欧氏距离 / sqrt(weight)
+        // 所以：加权距离² = 欧氏距离² / weight
+        const weightedDistSq = euclideanDistSq / weight;
         
-        if (weightedDist < minDist) {
-          minDist = weightedDist;
+        if (weightedDistSq < minWeightedDistSq) {
+          minWeightedDistSq = weightedDistSq;
           closestSite = site;
         }
       }
 
       if (closestSite) {
         const cityIndex = cityIndexMap.get(closestSite.city);
-        if (cityIndex !== undefined && colors[cityIndex]) {
-          const color = colors[cityIndex];
-          
+        if (cityIndex !== undefined) {
           // 填充当前像素块
           for (let dy = 0; dy < resolution && (y + dy) < height; dy++) {
             for (let dx = 0; dx < resolution && (x + dx) < width; dx++) {
               const px = x + dx;
               const py = y + dy;
               if (px < width && py < height) {
-                const idx = (py * width + px) * 4;
-                data[idx] = color.r;     // R
-                data[idx + 1] = color.g; // G
-                data[idx + 2] = color.b; // B
-                data[idx + 3] = color.a; // A
-                
                 // 保存区域索引
                 regionPixelMap[py * width + px] = cityIndex;
               }
@@ -869,6 +857,43 @@ const drawWeightedVoronoi = async (ctx, sitesWithWeights, cityOrder, width, heig
     // 每处理一定行数后，让浏览器有机会渲染
     if (y % (resolution * 50) === 0) {
       await waitNextFrame();
+    }
+  }
+  
+  return regionPixelMap;
+};
+
+/**
+ * 绘制加权维诺图到canvas
+ * @param {CanvasRenderingContext2D} ctx - canvas上下文
+ * @param {Array} sitesWithWeights - 站点数组（包含x, y, weight, city）
+ * @param {Array} cityOrder - 城市顺序
+ * @param {number} width - 画布宽度
+ * @param {number} height - 画布高度
+ * @param {Array} colors - 颜色数组 [{r, g, b, a}, ...]
+ * @param {number} resolution - 分辨率步长（默认2，值越小越精确但越慢）
+ * @returns {Uint8Array} 区域像素映射，每个像素存储城市索引
+ */
+const drawWeightedVoronoi = async (ctx, sitesWithWeights, cityOrder, width, height, colors, resolution = 2) => {
+  // 先计算区域映射（使用优化的算法，避免平方根）
+  const regionPixelMap = await computeWeightedVoronoiMap(sitesWithWeights, cityOrder, width, height, resolution);
+  
+  // 创建ImageData用于批量绘制
+  const imageData = ctx.createImageData(width, height);
+  const data = imageData.data;
+
+  // 根据区域映射填充颜色
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const cityIndex = regionPixelMap[y * width + x];
+      if (cityIndex !== undefined && colors[cityIndex]) {
+        const color = colors[cityIndex];
+        const idx = (y * width + x) * 4;
+        data[idx] = color.r;     // R
+        data[idx + 1] = color.g; // G
+        data[idx + 2] = color.b; // B
+        data[idx + 3] = color.a; // A
+      }
     }
   }
 
@@ -1890,6 +1915,11 @@ const handleRenderCloud = async () => {
     loadingTotalIterations.value = maxIterations;
     loadingCurrentIteration.value = 0;
     
+    // 迭代优化时使用粗分辨率（加快计算速度）
+    const iterationResolution = 4; // 粗分辨率，用于快速迭代
+    // 最终绘制时使用细分辨率（保证精度）
+    const finalResolution = 2; // 细分辨率，用于最终绘制
+    
     console.log('========== 开始迭代优化（跑满20次） ==========');
     
     for (let iteration = 0; iteration < maxIterations; iteration++) {
@@ -1897,14 +1927,15 @@ const handleRenderCloud = async () => {
       loadingStage.value = `正在迭代优化加权维诺图...`;
       await waitNextFrame();
       
-      // 创建临时canvas用于计算（避免频繁重绘主canvas）
-      const tempCanvas = document.createElement('canvas');
-      tempCanvas.width = width;
-      tempCanvas.height = height;
-      const tempCtx = tempCanvas.getContext('2d');
-      
-      // 绘制当前迭代的加权维诺图（使用临时颜色，仅用于计算区域映射）
-      const currentRegionPixelMap = await drawWeightedVoronoi(tempCtx, currentSites, cityOrder, width, height, tempColors, 2);
+      // 使用粗分辨率计算区域映射（不绘制，只计算）
+      // 优化：避免平方根运算，使用距离平方比较
+      const currentRegionPixelMap = await computeWeightedVoronoiMap(
+        currentSites, 
+        cityOrder, 
+        width, 
+        height, 
+        iterationResolution
+      );
       
       // 计算面积误差率（不输出详细信息，只在最后一次输出）
       const { averageErrorRate, actualAreas, expectedAreas } = calculateAreaErrorRate(
@@ -1945,16 +1976,18 @@ const handleRenderCloud = async () => {
     loadingStage.value = '正在计算颜色分配（基于最优剖分）...';
     await waitNextFrame();
     
-    // 如果没有最佳区域映射，先计算一次
-    if (!bestRegionPixelMap) {
-      const tempCanvas = document.createElement('canvas');
-      tempCanvas.width = width;
-      tempCanvas.height = height;
-      const tempCtx = tempCanvas.getContext('2d');
-      // 使用临时颜色先计算区域映射
-      const tempColors = cityOrder.map(() => ({ r: 200, g: 200, b: 200, a: 255 }));
-      bestRegionPixelMap = await drawWeightedVoronoi(tempCtx, bestSites, cityOrder, width, height, tempColors, 2);
-    }
+    // 使用最佳站点位置，用细分辨率重新计算最终的区域映射
+    loadingStage.value = '正在计算最终区域映射（细分辨率）...';
+    await waitNextFrame();
+    
+    // 使用细分辨率计算最终的区域映射（不绘制，只计算）
+    bestRegionPixelMap = await computeWeightedVoronoiMap(
+      bestSites, 
+      cityOrder, 
+      width, 
+      height, 
+      finalResolution
+    );
     
     // 基于最优区域映射计算颜色
     const { colors, colorIndices } = precomputeCityColors(cityOrder, bestRegionPixelMap, width, height, true);
@@ -1968,7 +2001,7 @@ const handleRenderCloud = async () => {
     // 清空canvas
     voronoiCtx.clearRect(0, 0, width, height);
     
-    // 保存区域映射
+    // 保存区域映射（使用细分辨率计算的最终结果）
     savedRegionPixelMap = bestRegionPixelMap;
     
     // 根据背景模式决定如何绘制
