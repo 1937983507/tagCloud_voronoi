@@ -29,7 +29,7 @@ export const usePoiStore = defineStore('poiStore', {
       fontFamily: '等线',
       fontWeight: '700',
       language: 'zh', // 语言选择：'zh' 中文，'en' 英文
-      showCityIndex: false, // 是否在城市名前显示序号
+      showCityIndex: true, // 是否在城市名前显示序号
     },
     colorSettings: {
       background: 'rgb(255, 255, 255)',
