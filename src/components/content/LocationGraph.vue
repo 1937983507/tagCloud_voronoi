@@ -213,7 +213,7 @@ const drawProvinceGraph = (group, width, height) => {
   labels.attr('x', (d) => d.x).attr('y', (d) => d.y - d.radius - 10);
 };
 
-// 使用D3力导向图绘制路径城市
+// 使用蛇形排布绘制路径城市
 const drawRouteGraph = (group, width, height) => {
   const cities = routeCities.value || [];
   if (!cities.length) {
@@ -228,86 +228,154 @@ const drawRouteGraph = (group, width, height) => {
     return;
   }
 
-  // 创建节点
+  const padding = 40;
+  const nodeRadius = 6;
+  const labelOffsetY = 15; // 标签在节点上方的偏移
+  
+  // 根据节点数量动态调整最小间距（点少时间距小，点多时间距大）
+  const baseMinSpacingX = 60;
+  const baseMinSpacingY = 40;
+  const minNodeSpacingX = Math.max(50, baseMinSpacingX - Math.min(cities.length * 2, 30));
+  const minNodeSpacingY = Math.max(35, baseMinSpacingY - Math.min(cities.length * 1.5, 20));
+
+  // 计算可用空间（确保所有节点都在这个范围内）
+  const availableWidth = width - padding * 2;
+  const availableHeight = height - padding * 2;
+
+  // 智能计算布局参数
+  // 首先尝试不同的行数，找到最优的布局方案
+  let bestLayout = null;
+  let bestScore = Infinity;
+
+  // 尝试不同的行数（从1行到最多需要的行数）
+  const maxPossibleRows = Math.min(Math.ceil(cities.length), Math.ceil(availableHeight / minNodeSpacingY) + 1);
+  for (let numRows = 1; numRows <= maxPossibleRows; numRows++) {
+    const nodesPerRow = Math.ceil(cities.length / numRows);
+    
+    // 计算需要的间距（确保第一个节点在 padding，最后一个节点在 width - padding）
+    const requiredSpacingX = nodesPerRow > 1 
+      ? availableWidth / (nodesPerRow - 1) 
+      : 0;
+    const requiredSpacingY = numRows > 1 
+      ? availableHeight / (numRows - 1) 
+      : 0;
+    
+    // 检查是否满足最小间距要求
+    if (requiredSpacingX < minNodeSpacingX || requiredSpacingY < minNodeSpacingY) {
+      continue;
+    }
+    
+    // 计算布局评分（优先选择宽高比更接近容器宽高比的方案）
+    const containerAspectRatio = availableWidth / availableHeight;
+    const layoutAspectRatio = (nodesPerRow * requiredSpacingX) / (numRows * requiredSpacingY);
+    const aspectRatioDiff = Math.abs(containerAspectRatio - layoutAspectRatio);
+    
+    // 同时考虑间距的均匀性
+    const spacingUniformity = Math.abs(requiredSpacingX - requiredSpacingY) / Math.max(requiredSpacingX, requiredSpacingY);
+    
+    const score = aspectRatioDiff * 0.7 + spacingUniformity * 0.3;
+    
+    if (score < bestScore) {
+      bestScore = score;
+      bestLayout = {
+        numRows,
+        nodesPerRow,
+        spacingX: requiredSpacingX,
+        spacingY: requiredSpacingY,
+      };
+    }
+  }
+
+  // 如果没有找到合适的布局，使用强制布局（确保所有节点都在边界内）
+  if (!bestLayout) {
+    // 根据可用空间和最小间距计算最大可能的行数和列数
+    const maxNodesPerRow = Math.max(1, Math.floor(availableWidth / minNodeSpacingX) + 1);
+    const maxRows = Math.max(1, Math.floor(availableHeight / minNodeSpacingY) + 1);
+    
+    // 尝试找到最接近正方形布局的方案
+    let nodesPerRow = Math.ceil(Math.sqrt(cities.length * (availableWidth / availableHeight)));
+    nodesPerRow = Math.max(1, Math.min(nodesPerRow, maxNodesPerRow));
+    const numRows = Math.ceil(cities.length / nodesPerRow);
+    
+    // 确保行数不超过限制
+    const finalNumRows = Math.min(numRows, maxRows);
+    const finalNodesPerRow = Math.ceil(cities.length / finalNumRows);
+    
+    bestLayout = {
+      numRows: finalNumRows,
+      nodesPerRow: finalNodesPerRow,
+      spacingX: finalNodesPerRow > 1 ? availableWidth / (finalNodesPerRow - 1) : 0,
+      spacingY: finalNumRows > 1 ? availableHeight / (finalNumRows - 1) : 0,
+    };
+  }
+
+  const { numRows, nodesPerRow, spacingX, spacingY } = bestLayout;
+
+  // 计算起始位置（第一个节点在 padding 位置）
+  const startX = padding;
+  const startY = padding;
+
+  // 创建节点并计算蛇形位置
   const nodes = cities.map((city, index) => {
-    const match = poiStore.allPOI.find(
-      (poi) => normalizeCityName(poi.city) === normalizeCityName(city)
-    );
+    const row = Math.floor(index / nodesPerRow);
+    const colInRow = index % nodesPerRow;
+    
+    // 判断当前行是奇数行还是偶数行（从0开始计数）
+    // 偶数行（0, 2, 4...）：从左到右
+    // 奇数行（1, 3, 5...）：从右到左
+    const isEvenRow = row % 2 === 0;
+    
+    // 计算当前行的实际节点数
+    const nodesInCurrentRow = row === numRows - 1 
+      ? cities.length - row * nodesPerRow 
+      : nodesPerRow;
+    
+    // 计算当前行的起始X位置（居中该行）
+    let rowStartX;
+    if (nodesInCurrentRow === 1) {
+      // 单节点居中
+      rowStartX = startX + availableWidth / 2;
+    } else {
+      // 多节点：第一个节点在 startX，最后一个节点在 startX + availableWidth
+      const rowWidth = (nodesInCurrentRow - 1) * spacingX;
+      rowStartX = startX + (availableWidth - rowWidth) / 2;
+    }
+    
+    // 计算列位置（考虑蛇形）
+    let col;
+    if (isEvenRow) {
+      col = colInRow;
+    } else {
+      col = nodesInCurrentRow - 1 - colInRow;
+    }
+    
+    // 计算节点位置（确保在边界内）
+    const x = nodesInCurrentRow > 1 
+      ? rowStartX + col * spacingX 
+      : rowStartX;
+    const y = numRows > 1 
+      ? startY + row * spacingY 
+      : startY + availableHeight / 2;
+    
+    // 边界检查：确保节点在可见区域内
+    const finalX = Math.max(padding + nodeRadius, Math.min(width - padding - nodeRadius, x));
+    const finalY = Math.max(padding + nodeRadius, Math.min(height - padding - nodeRadius, y));
+
     return {
       id: `${city}-${index}`,
       name: city,
       index,
-      lon: match?.X_gcj02 ?? 105 + (index % 6) * 2,
-      lat: match?.Y_gcj02 ?? 30 + (index % 6) * 1.5,
-      radius: 6,
+      x: finalX,
+      y: finalY,
+      radius: nodeRadius,
     };
   });
 
-  // 创建边（按顺序连接）
+  // 创建边（按顺序连接相邻节点）
   const links = [];
   for (let i = 0; i < nodes.length - 1; i++) {
-    links.push({ source: nodes[i].id, target: nodes[i + 1].id });
+    links.push({ source: nodes[i], target: nodes[i + 1] });
   }
-
-  // 计算地理坐标范围
-  const lonExtent = d3.extent(nodes, (d) => d.lon);
-  const latExtent = d3.extent(nodes, (d) => d.lat);
-  if (lonExtent[0] === lonExtent[1]) {
-    lonExtent[0] -= 1;
-    lonExtent[1] += 1;
-  }
-  if (latExtent[0] === latExtent[1]) {
-    latExtent[0] -= 1;
-    latExtent[1] += 1;
-  }
-
-  const padding = 40;
-  const xScale = d3
-    .scaleLinear()
-    .domain(lonExtent)
-    .range([padding, width - padding]);
-  const yScale = d3
-    .scaleLinear()
-    .domain(latExtent)
-    .range([height - padding, padding]);
-
-  // 初始化节点位置（基于地理坐标）
-  nodes.forEach((node) => {
-    node.x = xScale(node.lon);
-    node.y = yScale(node.lat);
-    node.vx = 0;
-    node.vy = 0;
-  });
-
-  // 创建力导向图（使用较弱的力，保持地理布局）
-  simulation = d3
-    .forceSimulation(nodes)
-    .force(
-      'link',
-      d3
-        .forceLink(links)
-        .id((d) => d.id)
-        .distance(80)
-        .strength(0.8)
-    )
-    .force('charge', d3.forceManyBody().strength(-300))
-    .force('collision', d3.forceCollide().radius((d) => d.radius + 5))
-    .alpha(0.5)
-    .alphaDecay(0.1)
-    .velocityDecay(0.6);
-
-  // 创建渐变
-  const gradientId = `route-gradient-${Date.now()}`;
-  const defs = group.append('defs');
-  const gradient = defs
-    .append('linearGradient')
-    .attr('id', gradientId)
-    .attr('x1', '0%')
-    .attr('x2', '100%')
-    .attr('y1', '0%')
-    .attr('y2', '100%');
-  gradient.append('stop').attr('offset', '0%').attr('stop-color', '#4b9cff');
-  gradient.append('stop').attr('offset', '100%').attr('stop-color', '#ffe873');
 
   // 绘制边
   const link = group
@@ -317,7 +385,11 @@ const drawRouteGraph = (group, width, height) => {
     .data(links)
     .enter()
     .append('line')
-    .attr('stroke', `url(#${gradientId})`)
+    .attr('x1', (d) => d.source.x)
+    .attr('y1', (d) => d.source.y)
+    .attr('x2', (d) => d.target.x)
+    .attr('y2', (d) => d.target.y)
+    .attr('stroke', '#000000')
     .attr('stroke-width', 3)
     .attr('stroke-opacity', 0.8)
     .attr('stroke-linecap', 'round');
@@ -330,6 +402,8 @@ const drawRouteGraph = (group, width, height) => {
     .data(nodes)
     .enter()
     .append('circle')
+    .attr('cx', (d) => d.x)
+    .attr('cy', (d) => d.y)
     .attr('r', (d) => d.radius)
     .attr('fill', '#ff7a7a')
     .attr('stroke', '#fff')
@@ -350,7 +424,8 @@ const drawRouteGraph = (group, width, height) => {
     .selectAll('g')
     .data(nodes)
     .enter()
-    .append('g');
+    .append('g')
+    .attr('transform', (d) => `translate(${d.x},${d.y - d.radius - labelOffsetY})`);
 
   labels
     .append('rect')
@@ -372,30 +447,8 @@ const drawRouteGraph = (group, width, height) => {
     .attr('font-weight', 600)
     .text((d) => `${d.index + 1}. ${d.name}`);
 
-  // 更新位置（添加边界约束）
-  const routeMinX = padding;
-  const routeMaxX = width - padding;
-  const routeMinY = padding;
-  const routeMaxY = height - padding;
-
-  simulation.on('tick', () => {
-    // 约束节点在画布内
-    nodes.forEach((d) => {
-      const radius = d.radius || 6;
-      d.x = Math.max(routeMinX + radius, Math.min(routeMaxX - radius, d.x));
-      d.y = Math.max(routeMinY + radius, Math.min(routeMaxY - radius, d.y));
-    });
-
-    link
-      .attr('x1', (d) => d.source.x)
-      .attr('y1', (d) => d.source.y)
-      .attr('x2', (d) => d.target.x)
-      .attr('y2', (d) => d.target.y);
-
-    node.attr('cx', (d) => d.x).attr('cy', (d) => d.y);
-
-    labels.attr('transform', (d) => `translate(${d.x},${d.y - d.radius - 15})`);
-  });
+  // 不再需要 simulation，因为位置已经固定
+  simulation = null;
 };
 
 onMounted(() => {
