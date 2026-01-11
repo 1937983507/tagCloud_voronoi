@@ -73,31 +73,56 @@
           <div class="spinner-dot"></div>
         </div>
         <div class="cloud-loading-main-text">
-          请稍等，正在生成标签云…
+          请稍等…
         </div>
         <div class="cloud-loading-sub-text">
           {{ loadingStage || '正在准备数据与布局，请不要关闭页面。' }}
         </div>
-        <div
-          v-if="loadingTotalCities > 0"
-          class="cloud-loading-city-text"
-        >
-          当前城市（{{ loadingCurrentIndex }}/{{ loadingTotalCities }}）：
-          <span class="cloud-loading-city-name">
-            {{ loadingCurrentCity || '分析城市中…' }}
-          </span>
-        </div>
-        <div class="cloud-loading-progress-wrapper" v-if="loadingTotalCities > 0">
-          <div class="cloud-loading-progress-bar">
-            <div
-              class="cloud-loading-progress-inner"
-              :style="{ width: loadingPercent + '%' }"
-            ></div>
+        
+        <!-- 加权维诺图模式：显示迭代进度 -->
+        <template v-if="loadingMode === 'voronoi'">
+          <div
+            v-if="loadingTotalIterations > 0"
+            class="cloud-loading-iteration-text"
+          >
+            迭代进度（{{ loadingCurrentIteration }}/{{ loadingTotalIterations }}）
           </div>
-          <span class="cloud-loading-progress-text">
-            进度约 {{ loadingPercent }}%
-          </span>
-        </div>
+          <div class="cloud-loading-progress-wrapper" v-if="loadingTotalIterations > 0">
+            <div class="cloud-loading-progress-bar">
+              <div
+                class="cloud-loading-progress-inner"
+                :style="{ width: loadingPercent + '%' }"
+              ></div>
+            </div>
+            <span class="cloud-loading-progress-text">
+              进度约 {{ loadingPercent }}%
+            </span>
+          </div>
+        </template>
+        
+        <!-- 词云模式：显示城市进度 -->
+        <template v-else-if="loadingMode === 'wordcloud'">
+          <div
+            v-if="loadingTotalCities > 0"
+            class="cloud-loading-city-text"
+          >
+            当前城市（{{ loadingCurrentIndex }}/{{ loadingTotalCities }}）：
+            <span class="cloud-loading-city-name">
+              {{ loadingCurrentCity || '分析城市中…' }}
+            </span>
+          </div>
+          <div class="cloud-loading-progress-wrapper" v-if="loadingTotalCities > 0">
+            <div class="cloud-loading-progress-bar">
+              <div
+                class="cloud-loading-progress-inner"
+                :style="{ width: loadingPercent + '%' }"
+              ></div>
+            </div>
+            <span class="cloud-loading-progress-text">
+              进度约 {{ loadingPercent }}%
+            </span>
+          </div>
+        </template>
       </div>
     </div>
   </aside>
@@ -112,10 +137,8 @@ import { usePoiStore } from '@/stores/poiStore';
 import axios from 'axios';
 import { ElButton, ElSpace, ElDropdown, ElDropdownMenu, ElDropdownItem, ElIcon, ElInputNumber, ElDialog, ElColorPicker, ElCheckbox } from 'element-plus';
 import { ArrowDown } from '@element-plus/icons-vue';
-import { cityNameToPinyin } from '@/utils/cityNameToPinyin';
-import { layoutWordCloudsWithShape } from '@/utils/wordCloudLayoutShape';
-import { updateSitesWithOrderCentroids, setOrderSiteParams, rescueDisconnectedSites, trueCentroidOfRegion, enforceMinAreaWeights, REGION_MIN_PIXELS } from '@/utils/wordCloudMaskUtils';
 import { recordTagCloudGeneration } from '@/utils/statistics';
+import { cityNameToPinyin } from '@/utils/cityNameToPinyin';
 
 const exportDialogVisible = ref(false)
 const exportWidth = ref(800)
@@ -169,14 +192,27 @@ let savedSites = null; // 保存站点信息（用于绘制线条）：Array<{ci
 const cloudLoading = computed(() => poiStore.cloudLoading);
 
 // 遮罩上的友好提示信息
+const loadingMode = ref('voronoi');     // 遮罩模式：'voronoi' 计算加权维诺图，'wordcloud' 计算词云
 const loadingStage = ref('');           // 当前阶段文案，例如"正在计算城市权重…"
 const loadingCurrentCity = ref('');     // 当前正在处理的城市
 const loadingCurrentIndex = ref(0);     // 当前城市序号
 const loadingTotalCities = ref(0);      // 总城市数
+const loadingCurrentIteration = ref(0); // 当前迭代次数
+const loadingTotalIterations = ref(0);  // 总迭代次数
+
+// 计算进度百分比（根据模式）
 const loadingPercent = computed(() => {
-  if (!loadingTotalCities.value || loadingTotalCities.value <= 0) return 0;
-  const ratio = loadingCurrentIndex.value / loadingTotalCities.value;
-  return Math.min(100, Math.max(0, Math.round(ratio * 100)));
+  if (loadingMode.value === 'voronoi') {
+    // 加权维诺图模式：基于迭代进度
+    if (!loadingTotalIterations.value || loadingTotalIterations.value <= 0) return 0;
+    const ratio = loadingCurrentIteration.value / loadingTotalIterations.value;
+    return Math.min(100, Math.max(0, Math.round(ratio * 100)));
+  } else {
+    // 词云模式：基于城市进度
+    if (!loadingTotalCities.value || loadingTotalCities.value <= 0) return 0;
+    const ratio = loadingCurrentIndex.value / loadingTotalCities.value;
+    return Math.min(100, Math.max(0, Math.round(ratio * 100)));
+  }
 });
 
 const getDrawLineButtonElement = () => {
@@ -286,16 +322,12 @@ const loadCityCoordinates = async () => {
   }
 };
 
-// 计算每个城市景点权重
+// 计算每个城市景点权重（使用POI数量）
 const calculateCityWeights = (data, cityOrder) => {
   return cityOrder.map(city => {
     const cityData = data[city] || [];
-    // 权重基于景点数量和排名
-    const weight = cityData.reduce((sum, d) => {
-      const rank = parseInt(d.rankInChina) || 100000;
-      // 排名越小，权重越大（取倒数）
-      return sum + (1 / rank);
-    }, 0);
+    // 权重直接使用POI数量
+    const weight = cityData.length;
     // 如果权重为0，给一个最小值
     return {
       city: city,
@@ -527,33 +559,87 @@ const graphColoring = (adjacencyGraph, numColors) => {
 };
 
 /**
+ * 基于区域像素映射构建邻接图（用于图着色）
+ * @param {Uint8Array} regionPixelMap - 区域像素映射
+ * @param {Array} cityOrder - 城市顺序
+ * @param {number} width - 画布宽度
+ * @param {number} height - 画布高度
+ * @returns {Map} 邻接图，key为城市索引，value为相邻城市索引的Set
+ */
+const buildAdjacencyGraphFromRegionMap = (regionPixelMap, cityOrder, width, height) => {
+  // 构建邻接图
+  const adjacencyGraph = new Map();
+  cityOrder.forEach((_, index) => {
+    adjacencyGraph.set(index, new Set());
+  });
+
+  // 检测相邻区域（检查边界像素）
+  const directions = [[0, 1], [1, 0], [0, -1], [-1, 0]]; // 上下左右
+  const checkedPairs = new Set(); // 避免重复检查
+  
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = y * width + x;
+      const currentRegion = regionPixelMap[idx];
+      if (currentRegion === undefined) continue;
+
+      // 检查四个方向的邻居
+      for (const [dx, dy] of directions) {
+        const nx = x + dx;
+        const ny = y + dy;
+        
+        if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+          const neighborIdx = ny * width + nx;
+          const neighborRegion = regionPixelMap[neighborIdx];
+          
+          if (neighborRegion !== undefined && neighborRegion !== currentRegion) {
+            // 两个区域相邻，添加到邻接图
+            const pairKey = currentRegion < neighborRegion 
+              ? `${currentRegion}-${neighborRegion}` 
+              : `${neighborRegion}-${currentRegion}`;
+            
+            if (!checkedPairs.has(pairKey)) {
+              adjacencyGraph.get(currentRegion).add(neighborRegion);
+              adjacencyGraph.get(neighborRegion).add(currentRegion);
+              checkedPairs.add(pairKey);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return adjacencyGraph;
+};
+
+/**
  * 预计算所有城市的RGB颜色值（使用图着色确保相邻区域不同颜色）
  * @param {Array} cityOrder - 城市顺序
- * @param {Array} sitesWithWeights - 站点数组（用于构建邻接图）
+ * @param {Uint8Array} regionPixelMap - 区域像素映射（用于构建邻接图）
  * @param {number} width - 画布宽度
  * @param {number} height - 画布高度
  * @param {boolean} forceMultiColor - 是否强制使用复色模式（用于保存复色颜色信息）
  * @returns {Object} { colors: [{r, g, b, a}, ...], colorIndices: [0, 1, 2, ...] }
  */
-const precomputeCityColors = (cityOrder, sitesWithWeights = null, width = null, height = null, forceMultiColor = false) => {
+const precomputeCityColors = (cityOrder, regionPixelMap = null, width = null, height = null, forceMultiColor = false) => {
   // 如果 forceMultiColor 为 true，总是使用复色模式的透明度（用于保存复色颜色信息）
   // 否则根据当前的 backgroundMode 决定
   const opacity = (forceMultiColor || poiStore.colorSettings.backgroundMode === 'multi')
     ? (poiStore.colorSettings.backgroundMultiColorOpacity ?? 0.1)
     : 1;
   
-  // 如果有站点信息，使用图着色算法
+  // 如果有区域像素映射，使用图着色算法
   let colorIndices = null;
-  if (sitesWithWeights && width && height && cityOrder.length > 0) {
+  if (regionPixelMap && width && height && cityOrder.length > 0) {
     try {
-      // 构建邻接图（使用较低分辨率以提高性能）
-      const adjacencyGraph = buildAdjacencyGraph(sitesWithWeights, cityOrder, width, height, 4);
+      // 基于区域像素映射构建邻接图
+      const adjacencyGraph = buildAdjacencyGraphFromRegionMap(regionPixelMap, cityOrder, width, height);
       
       // 执行图着色
       const numColors = poiStore.Colors.length;
       colorIndices = graphColoring(adjacencyGraph, numColors);
       
-      console.log('图着色完成，颜色分配:', colorIndices);
+      console.log('图着色完成（基于最优剖分），颜色分配:', colorIndices);
     } catch (error) {
       console.warn('图着色失败，使用循环分配:', error);
       colorIndices = null;
@@ -604,69 +690,136 @@ const precomputeCityColors = (cityOrder, sitesWithWeights = null, width = null, 
 };
 
 /**
- * 根据画布大小动态计算迭代分辨率
+ * 快速更新背景颜色（基于缓存的区域像素映射）
+ * @param {CanvasRenderingContext2D} ctx - canvas上下文
  * @param {number} width - 画布宽度
  * @param {number} height - 画布高度
- * @returns {number} 分辨率步长（2-4像素）
+ * @param {Array} cityOrder - 城市顺序
+ * @param {boolean} forceRecalculate - 是否强制从配色方案重新计算（默认false）
+ * @returns {boolean} 是否成功更新
  */
-const calculateIterationResolution = (width, height) => {
-  const area = width * height;
-  // 根据画布面积动态调整分辨率
-  if (area < 200000) return 2;      // 小画布：2像素
-  if (area < 500000) return 3;      // 中等画布：3像素
-  return 4;                          // 大画布：4像素
+const fastUpdateBackgroundColors = (ctx, width, height, cityOrder, forceRecalculate = false) => {
+  // 检查必要的缓存数据
+  if (!savedRegionPixelMap || !savedColorIndices || !cityOrder || cityOrder.length === 0) {
+    console.warn('fastUpdateBackgroundColors: 缺少必要的缓存数据');
+    return false;
+  }
+  
+  // 检查背景模式
+  const backgroundMode = poiStore.colorSettings.backgroundMode || 'single';
+  
+  if (backgroundMode === 'single') {
+    // 单色模式：直接填充整个canvas
+    const singleColor = poiStore.colorSettings.background || '#ffffff';
+    ctx.fillStyle = singleColor;
+    ctx.fillRect(0, 0, width, height);
+    return true;
+  }
+  
+  // 复色模式：基于区域像素映射更新颜色
+  const opacity = poiStore.colorSettings.backgroundMultiColorOpacity ?? 0.1;
+  
+  // 计算每个城市的颜色（基于当前配色方案）
+  const cityColors = cityOrder.map((city, cityIndex) => {
+    const colorIndex = savedColorIndices[cityIndex];
+    const bgColor = poiStore.Colors[colorIndex % poiStore.Colors.length];
+    
+    // 转换颜色为rgba
+    let r, g, b;
+    if (bgColor.startsWith('#')) {
+      const hex = bgColor.slice(1);
+      r = parseInt(hex.slice(0, 2), 16);
+      g = parseInt(hex.slice(2, 4), 16);
+      b = parseInt(hex.slice(4, 6), 16);
+    } else if (bgColor.startsWith('rgb')) {
+      const rgbMatch = bgColor.match(/\d+/g);
+      if (rgbMatch && rgbMatch.length >= 3) {
+        r = parseInt(rgbMatch[0]);
+        g = parseInt(rgbMatch[1]);
+        b = parseInt(rgbMatch[2]);
+      } else {
+        r = g = b = 200;
+      }
+    } else {
+      r = g = b = 200;
+    }
+    
+    return {
+      r,
+      g,
+      b,
+      a: Math.floor(255 * opacity)
+    };
+  });
+  
+  // 创建ImageData用于批量绘制
+  const imageData = ctx.createImageData(width, height);
+  const data = imageData.data;
+  
+  // 遍历区域像素映射，填充颜色
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const index = y * width + x;
+      const cityIndex = savedRegionPixelMap[index];
+      
+      // 如果像素属于某个城市区域
+      if (cityIndex !== undefined && cityIndex < cityColors.length) {
+        const color = cityColors[cityIndex];
+        const pixelIndex = (y * width + x) * 4;
+        
+        data[pixelIndex] = color.r;     // R
+        data[pixelIndex + 1] = color.g; // G
+        data[pixelIndex + 2] = color.b; // B
+        data[pixelIndex + 3] = color.a; // A
+      } else {
+        // 如果像素不属于任何区域，填充白色
+        const pixelIndex = (y * width + x) * 4;
+        data[pixelIndex] = 255;     // R
+        data[pixelIndex + 1] = 255; // G
+        data[pixelIndex + 2] = 255; // B
+        data[pixelIndex + 3] = 255; // A
+      }
+    }
+  }
+  
+  // 将ImageData绘制到canvas
+  ctx.putImageData(imageData, 0, 0);
+  
+  return true;
 };
 
 /**
- * 生成加权Voronoi图（单次迭代）
+ * 绘制加权维诺图到canvas
+ * @param {CanvasRenderingContext2D} ctx - canvas上下文
  * @param {Array} sitesWithWeights - 站点数组（包含x, y, weight, city）
  * @param {Array} cityOrder - 城市顺序
  * @param {number} width - 画布宽度
  * @param {number} height - 画布高度
- * @param {number} resolution - 分辨率步长（默认1，迭代时使用2-4）
- * @param {boolean} generateImageData - 是否生成ImageData（迭代时为false，最终绘制时为true）
- * @param {Array} precomputedColors - 预计算的颜色数组
- * @param {boolean} saveRegionMap - 是否保存区域像素映射（用于快速更新颜色）
- * @returns {Object} { imageData, cityCenters, cityPixelCounts, sites, regionPixelMap }
+ * @param {Array} colors - 颜色数组 [{r, g, b, a}, ...]
+ * @param {number} resolution - 分辨率步长（默认2，值越小越精确但越慢）
+ * @returns {Uint8Array} 区域像素映射，每个像素存储城市索引
  */
-const generateSingleVoronoi = (sitesWithWeights, cityOrder, width, height, resolution = 1, generateImageData = false, precomputedColors = null, saveRegionMap = false) => {
-  let imageData = null;
-  let pixelData = null;
-  let regionPixelMap = null; // 区域像素映射：Uint8Array，每个像素存储城市索引
-  
-  if (generateImageData) {
-    imageData = new ImageData(width, height);
-    pixelData = imageData.data;
-  }
-  
-  // 如果需要保存区域映射，创建Uint8Array
-  if (saveRegionMap) {
-    regionPixelMap = new Uint8Array(width * height);
-    // 初始化为255（无效值），用于调试
-    regionPixelMap.fill(255);
-  }
-  
+const drawWeightedVoronoi = async (ctx, sitesWithWeights, cityOrder, width, height, colors, resolution = 2) => {
   // 创建城市索引映射
   const cityIndexMap = new Map();
   cityOrder.forEach((city, index) => {
     cityIndexMap.set(city, index);
   });
 
-  // 计算每个城市的像素统计
-  const cityCenters = new Map();
-  const cityPixelCounts = new Map();
-  cityOrder.forEach(city => {
-    cityCenters.set(city, { x: 0, y: 0, count: 0 });
-    cityPixelCounts.set(city, 0);
-  });
+  // 创建区域像素映射（用于快速更新背景颜色）
+  const regionPixelMap = new Uint8Array(width * height);
+  
+  // 创建ImageData用于批量绘制
+  const imageData = ctx.createImageData(width, height);
+  const data = imageData.data;
 
-  // 遍历每个像素（按分辨率步长），计算加权距离，分配给最近的城市
+  // 计算每个像素属于哪个区域并填充颜色
   for (let y = 0; y < height; y += resolution) {
     for (let x = 0; x < width; x += resolution) {
-      // 找到最近的城市站点
       let minDist = Infinity;
       let closestSite = null;
       
+      // 找到最近的站点（基于加权距离）
       for (const site of sitesWithWeights) {
         const dx = x - site.x;
         const dy = y - site.y;
@@ -678,6 +831,7 @@ const generateSingleVoronoi = (sitesWithWeights, cityOrder, width, height, resol
         }
         
         const weight = Math.max(site.weight || 0.00001, 0.00001);
+        // 加权距离：距离除以权重的平方根
         const weightedDist = euclideanDist / Math.sqrt(weight);
         
         if (weightedDist < minDist) {
@@ -688,2014 +842,1207 @@ const generateSingleVoronoi = (sitesWithWeights, cityOrder, width, height, resol
 
       if (closestSite) {
         const cityIndex = cityIndexMap.get(closestSite.city);
-        if (cityIndex !== undefined) {
-          // 填充当前像素块（根据分辨率）
+        if (cityIndex !== undefined && colors[cityIndex]) {
+          const color = colors[cityIndex];
+          
+          // 填充当前像素块
           for (let dy = 0; dy < resolution && (y + dy) < height; dy++) {
             for (let dx = 0; dx < resolution && (x + dx) < width; dx++) {
               const px = x + dx;
               const py = y + dy;
-              
-              // 保存区域映射
-              if (saveRegionMap && regionPixelMap) {
-                const pixelIndex = py * width + px;
-                regionPixelMap[pixelIndex] = cityIndex;
-              }
-              
-              // 如果生成ImageData，填充像素颜色
-              if (generateImageData && pixelData && precomputedColors) {
-                const color = precomputedColors[cityIndex];
-                const index = (py * width + px) * 4;
-                pixelData[index] = color.r;     // R
-                pixelData[index + 1] = color.g; // G
-                pixelData[index + 2] = color.b; // B
-                pixelData[index + 3] = color.a; // A
+              if (px < width && py < height) {
+                const idx = (py * width + px) * 4;
+                data[idx] = color.r;     // R
+                data[idx + 1] = color.g; // G
+                data[idx + 2] = color.b; // B
+                data[idx + 3] = color.a; // A
+                
+                // 保存区域索引
+                regionPixelMap[py * width + px] = cityIndex;
               }
             }
           }
-
-          // 计算形心（质心）- 使用采样点的坐标，但需要按分辨率权重计算
-          const center = cityCenters.get(closestSite.city);
-          if (center) {
-            // 对于低分辨率采样，需要按像素块大小加权
-            const pixelBlockSize = resolution * resolution;
-            center.x += x * pixelBlockSize;
-            center.y += y * pixelBlockSize;
-            center.count += pixelBlockSize;
-            cityPixelCounts.set(closestSite.city, cityPixelCounts.get(closestSite.city) + pixelBlockSize);
-          }
         }
       }
     }
+    
+    // 每处理一定行数后，让浏览器有机会渲染
+    if (y % (resolution * 50) === 0) {
+      await waitNextFrame();
+    }
   }
 
-  return { imageData, cityCenters, cityPixelCounts, sites: sitesWithWeights, regionPixelMap };
+  // 将ImageData绘制到canvas
+  ctx.putImageData(imageData, 0, 0);
+  
+  return regionPixelMap;
 };
 
 /**
- * 计算面积误差率
- * @param {Map} cityPixelCounts - 每个城市的实际像素数
- * @param {Array} cityWeights - 城市权重数组
- * @param {number} totalPixels - 总像素数
- * @returns {Object} { averageErrorRate, errorRates }
+ * 计算面积误差率并输出到控制台
+ * @param {Uint8Array} regionPixelMap - 区域像素映射
+ * @param {Array} sitesWithWeights - 站点数组（包含weight, city）
+ * @param {Array} cityOrder - 城市顺序
+ * @param {number} width - 画布宽度
+ * @param {number} height - 画布高度
+ * @param {boolean} verbose - 是否输出详细信息到控制台
+ * @returns {Object} { averageErrorRate, areaMetrics, actualAreas, expectedAreas }
  */
-const calculateAreaErrorRate = (cityPixelCounts, cityWeights, totalPixels) => {
+const calculateAreaErrorRate = (regionPixelMap, sitesWithWeights, cityOrder, width, height, verbose = true) => {
+  if (!regionPixelMap || regionPixelMap.length === 0) {
+    console.warn('区域像素映射为空，无法计算面积误差率');
+    return { averageErrorRate: 0, areaMetrics: [], actualAreas: [], expectedAreas: [] };
+  }
+  
+  // 创建城市索引映射
+  const cityIndexMap = new Map();
+  cityOrder.forEach((city, index) => {
+    cityIndexMap.set(city, index);
+  });
+  
+  // 创建城市到权重的映射
+  const cityWeightMap = new Map();
+  sitesWithWeights.forEach(site => {
+    cityWeightMap.set(site.city, site.weight);
+  });
+  
   // 计算总权重
-  const totalWeight = cityWeights.reduce((sum, w) => sum + w.weight, 0);
+  const totalWeight = sitesWithWeights.reduce((sum, site) => sum + site.weight, 0);
   
-  const errorRates = [];
+  // 计算总画布面积（像素数）
+  const totalArea = width * height;
   
-  cityWeights.forEach(weightInfo => {
-    const city = weightInfo.city;
-    const targetArea = (weightInfo.weight / totalWeight) * totalPixels;
-    const actualArea = cityPixelCounts.get(city) || 0;
-    const errorRate = targetArea > 0 ? Math.abs(actualArea - targetArea) / targetArea : 0;
-    errorRates.push({ city, targetArea, actualArea, errorRate });
+  // 统计每个区域的实际像素数
+  const actualAreas = new Array(cityOrder.length).fill(0);
+  for (let i = 0; i < regionPixelMap.length; i++) {
+    const cityIndex = regionPixelMap[i];
+    if (cityIndex !== undefined && cityIndex < cityOrder.length) {
+      actualAreas[cityIndex]++;
+    }
+  }
+  
+  // 计算每个区域的指标
+  const areaMetrics = [];
+  const expectedAreas = [];
+  let totalErrorRate = 0;
+  
+  cityOrder.forEach((city, index) => {
+    const weight = cityWeightMap.get(city) || 0;
+    const expectedArea = totalWeight > 0 ? (weight / totalWeight) * totalArea : 0;
+    const actualArea = actualAreas[index] || 0;
+    const error = Math.abs(actualArea - expectedArea);
+    const errorRate = expectedArea > 0 ? (error / expectedArea) * 100 : 0;
+    
+    totalErrorRate += errorRate;
+    expectedAreas.push(expectedArea);
+    
+    areaMetrics.push({
+      city,
+      weight,
+      expectedArea: Math.round(expectedArea),
+      actualArea,
+      error: Math.round(error),
+      errorRate: errorRate.toFixed(2)
+    });
   });
   
-  const averageErrorRate = errorRates.reduce((sum, e) => sum + e.errorRate, 0) / errorRates.length;
+  // 计算平均面积误差率
+  const averageErrorRate = cityOrder.length > 0 ? totalErrorRate / cityOrder.length : 0;
   
-  return { averageErrorRate, errorRates };
+  // 输出到控制台（仅在verbose模式下）
+  if (verbose) {
+    console.log('========== 加权维诺图面积误差率统计 ==========');
+    console.log(`总画布面积: ${totalArea} 像素`);
+    console.log(`总权重: ${totalWeight.toFixed(2)}`);
+    console.log(`平均面积误差率: ${averageErrorRate.toFixed(2)}%`);
+    console.log('');
+    console.log('各个子空间的详细指标:');
+    console.table(areaMetrics);
+    console.log('==============================================');
+  }
+  
+  return { averageErrorRate, areaMetrics, actualAreas, expectedAreas };
 };
 
 /**
- * 计算形心并更新站点位置
- * @param {Map} cityCenters - 城市形心数据
- * @param {Array} sitesWithWeights - 当前站点数组
- * @returns {Array} 更新后的站点数组
+ * 计算区域中心点（质心）
+ * @param {Uint8Array} regionPixelMap - 区域像素映射
+ * @param {number} cityIndex - 城市索引
+ * @param {number} width - 画布宽度
+ * @param {number} height - 画布高度
+ * @returns {Object} { cx, cy } 区域中心点坐标
  */
-const updateSitesWithCentroids = (cityCenters, sitesWithWeights) => {
-  return sitesWithWeights.map(site => {
-    const center = cityCenters.get(site.city);
-    if (center && center.count > 0) {
-      // 使用形心作为新位置
-      return {
-        ...site,
-        x: center.x / center.count,
-        y: center.y / center.count
-      };
+const calculateRegionCentroid = (regionPixelMap, cityIndex, width, height) => {
+  let sumX = 0;
+  let sumY = 0;
+  let count = 0;
+  
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = y * width + x;
+      if (regionPixelMap[idx] === cityIndex) {
+        sumX += x;
+        sumY += y;
+        count++;
+      }
     }
-    return site; // 如果没有形心数据，保持原位置
+  }
+  
+  if (count === 0) {
+    return { cx: width / 2, cy: height / 2 };
+  }
+  
+  return { cx: sumX / count, cy: sumY / count };
+};
+
+/**
+ * 调整种子点位置：直接将种子点移动到当前区域的质心处
+ * @param {Array} sitesWithWeights - 站点数组
+ * @param {Uint8Array} regionPixelMap - 区域像素映射
+ * @param {Array} cityOrder - 城市顺序
+ * @param {number} width - 画布宽度
+ * @param {number} height - 画布高度
+ * @returns {Array} 调整后的站点数组
+ */
+const adjustSeedPoints = (sitesWithWeights, regionPixelMap, cityOrder, width, height) => {
+  const adjustedSites = sitesWithWeights.map((site) => {
+    const cityIndex = cityOrder.indexOf(site.city);
+    if (cityIndex === -1) return site;
+    
+    // 计算区域质心
+    const centroid = calculateRegionCentroid(regionPixelMap, cityIndex, width, height);
+    
+    // 直接将种子点移动到质心位置
+    // 确保不超出画布边界
+    const newX = Math.max(0, Math.min(width - 1, centroid.cx));
+    const newY = Math.max(0, Math.min(height - 1, centroid.cy));
+    
+    return {
+      ...site,
+      x: newX,
+      y: newY
+    };
   });
+  
+  return adjustedSites;
 };
 
 /**
- * 检查点是否在指定城市的Voronoi区域内
- * @param {number} x - 点的x坐标
- * @param {number} y - 点的y坐标
- * @param {string} city - 城市名称
- * @param {Map} regionMap - 区域映射
+ * 检查点是否在指定区域内
+ * @param {Uint8Array} regionPixelMap - 区域像素映射
+ * @param {number} cityIndex - 城市索引
+ * @param {number} x - x坐标
+ * @param {number} y - y坐标
+ * @param {number} width - 画布宽度
+ * @param {number} height - 画布高度
  * @returns {boolean} 是否在区域内
  */
-const isPointInCityRegion = (x, y, city, regionMap) => {
-  if (!regionMap || !regionMap.has(city)) {
+const isPointInRegion = (regionPixelMap, cityIndex, x, y, width, height) => {
+  const px = Math.floor(x);
+  const py = Math.floor(y);
+  if (px < 0 || px >= width || py < 0 || py >= height) {
     return false;
   }
-  const pixelKey = `${Math.floor(x)},${Math.floor(y)}`;
-  return regionMap.get(city).has(pixelKey);
+  const idx = py * width + px;
+  return regionPixelMap[idx] === cityIndex;
+};
+
+// ========== 位图掩码碰撞检测系统（基于d3-cloud算法） ==========
+
+// 常量定义（参考d3-cloud）
+const SPRITE_CANVAS_WIDTH = 1 << 11 >> 5; // 64
+const SPRITE_CANVAS_HEIGHT = 1 << 11; // 2048
+const RADIANS = Math.PI / 180;
+
+/**
+ * 获取Canvas上下文和像素比
+ * @param {HTMLCanvasElement} canvas - canvas元素
+ * @returns {Object} {context, ratio}
+ */
+const getContextAndRatio = (canvas) => {
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  
+  // 检测像素比
+  canvas.width = canvas.height = 1;
+  const ratio = Math.sqrt(context.getImageData(0, 0, 1, 1).data.length >> 2);
+  canvas.width = (SPRITE_CANVAS_WIDTH << 5) / ratio;
+  canvas.height = SPRITE_CANVAS_HEIGHT / ratio;
+  
+  context.fillStyle = context.strokeStyle = 'red';
+  
+  return { context, ratio };
 };
 
 /**
- * 检查文字边界框是否完全在区域内
- * @param {number} x - 文字中心x坐标
- * @param {number} y - 文字中心y坐标
- * @param {number} textWidth - 文字宽度
- * @param {number} textHeight - 文字高度
- * @param {string} city - 城市名称
- * @param {Map} regionMap - 区域映射
- * @param {number} width - 画布宽度
- * @param {number} height - 画布高度
- * @param {number} margin - 安全边距
- * @returns {boolean} 是否在区域内
+ * 生成标签的位图掩码（sprite）
+ * @param {CanvasRenderingContext2D} spriteCtx - sprite canvas上下文
+ * @param {number} spriteRatio - sprite canvas的像素比
+ * @param {Object} word - 标签对象 {text, size, fontFamily, fontWeight}
+ * @param {number} padding - 标签内边距
+ * @returns {Object} {sprite, width, height, x0, y0, x1, y1} sprite位图掩码和尺寸信息
  */
-const isTextInCityRegion = (x, y, textWidth, textHeight, city, regionMap, width, height, margin = 3) => {
-  // 计算文字边界框（带安全边距）
-  const left = x - textWidth/2 - margin;
-  const right = x + textWidth/2 + margin;
-  const top = y - textHeight/2 - margin;
-  const bottom = y + textHeight/2 + margin;
+const generateWordSprite = (spriteCtx, spriteRatio, word, padding = 1) => {
+  const { text, size, fontFamily, fontWeight } = word;
   
-  // 检查边界框是否在画布内
-  if (left < 0 || right > width || top < 0 || bottom > height) {
-    return false;
+  // 设置字体
+  const fontSize = Math.round((size + 1) / spriteRatio);
+  spriteCtx.save();
+  spriteCtx.font = `${fontWeight} ${fontSize}px ${fontFamily}`;
+  
+  // 测量文字尺寸
+  const metrics = spriteCtx.measureText(text);
+  const textWidth = metrics.width;
+  const textHeight = size * 2; // 估算高度
+  
+  // 计算绘制位置（文字居中）
+  const anchorX = -Math.floor(textWidth / 2);
+  const anchorY = 0;
+  
+  // 计算实际需要的canvas尺寸（考虑旋转）
+  let w = (textWidth + 1) * spriteRatio;
+  let h = textHeight;
+  
+  // 如果没有旋转，宽度需要对齐到32位边界
+  w = (w + 0x1f) >> 5 << 5; // 对齐到32的倍数
+  
+  // 创建临时canvas绘制文字
+  const tempCanvas = document.createElement('canvas');
+  tempCanvas.width = Math.ceil(w);
+  tempCanvas.height = Math.ceil(h);
+  const tempCtx = tempCanvas.getContext('2d');
+  tempCtx.fillStyle = 'red';
+  tempCtx.font = `${fontWeight} ${fontSize}px ${fontFamily}`;
+  tempCtx.textAlign = 'center';
+  tempCtx.textBaseline = 'middle';
+  
+  // 绘制文字
+  tempCtx.fillText(text, w / 2 / spriteRatio, h / 2 / spriteRatio);
+  
+  // 如果有padding，绘制描边
+  if (padding) {
+    tempCtx.strokeStyle = 'red';
+    tempCtx.lineWidth = 2 * padding;
+    tempCtx.strokeText(text, w / 2 / spriteRatio, h / 2 / spriteRatio);
   }
   
-  // 优化：减少采样点数量（5个关键点）
-  const samplePoints = [
-    [left, top],           // 左上角
-    [right, top],          // 右上角
-    [left, bottom],        // 左下角
-    [right, bottom],       // 右下角
-    [x, y]                 // 中心点
-  ];
+  // 读取像素数据生成sprite
+  const pixels = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height).data;
+  const w32 = w >> 5; // 宽度（32位为单位）
+  const sprite = new Uint32Array(w32 * h);
   
-  // 所有采样点都必须在区域内
-  for (let [px, py] of samplePoints) {
-    if (!isPointInCityRegion(px, py, city, regionMap)) {
-      return false;
-    }
-  }
+  // 找到实际有内容的区域（去除上下空白）
+  let seenRow = -1;
+  let firstSeenRow = -1;
   
-  return true;
-};
-
-/**
- * 更新碰撞检测的像素数据缓存
- * @param {CanvasRenderingContext2D} collisionCtx - 碰撞检测canvas的上下文
- * @param {number} width - 画布宽度
- * @param {number} height - 画布高度
- */
-const updateCollisionImageData = (collisionCtx, width, height) => {
-  if (!collisionCtx) return;
-  
-  try {
-    // 获取整个canvas的像素数据并缓存
-    collisionImageData = collisionCtx.getImageData(0, 0, width, height);
-    collisionData = collisionImageData.data;
-    collisionWidth = width;
-  } catch (e) {
-    console.warn('更新碰撞数据失败:', e);
-    collisionImageData = null;
-    collisionData = null;
-    collisionWidth = 0;
-  }
-};
-
-/**
- * 检查文字位置是否与已有像素重叠（使用隐藏canvas进行像素级检测）
- * @param {number} x - 文字中心x坐标
- * @param {number} y - 文字中心y坐标
- * @param {number} textWidth - 文字宽度
- * @param {number} textHeight - 文字高度
- * @param {CanvasRenderingContext2D} collisionCtx - 碰撞检测canvas的上下文
- * @param {number} width - 画布宽度
- * @param {number} height - 画布高度
- * @param {number} sampleRate - 采样率（1表示每个像素都检查，2表示每2个像素检查一次，提高性能）
- * @returns {boolean} 是否重叠
- */
-const checkPixelCollision = (x, y, textWidth, textHeight, width, height, sampleRate = 3) => {
-  if (!collisionData || collisionWidth === 0) {
-    return false; // 如果没有缓存数据，不进行检测
-  }
-  
-  // 计算文字边界框（添加一些边距以确保安全）
-  const margin = 2;
-  const left = Math.max(0, Math.floor(x - textWidth/2 - margin));
-  const right = Math.min(width - 1, Math.ceil(x + textWidth/2 + margin));
-  const top = Math.max(0, Math.floor(y - textHeight/2 - margin));
-  const bottom = Math.min(height - 1, Math.ceil(y + textHeight/2 + margin));
-  
-  // 如果边界框无效，返回true（重叠）
-  if (left >= right || top >= bottom) {
-    return true;
-  }
-  
-  // 计算实际需要检查的区域大小
-  const w = right - left;
-  const h = bottom - top;
-  
-  // 如果区域太小，直接返回false
-  if (w <= 0 || h <= 0) {
-    return false;
-  }
-  
-  // 使用缓存的像素数据，直接从数组中读取（避免getImageData调用）
-  // 优化：根据区域大小和文字大小动态调整采样策略
-  const effectiveSampleRate = textWidth < 20 ? 1 : (textWidth < 35 ? 2 : 3);
-  
-  // 优化：提前计算边界，避免重复计算
-  const leftBound = Math.max(0, left);
-  const rightBound = Math.min(width, right);
-  const topBound = Math.max(0, top);
-  const bottomBound = Math.min(height, bottom);
-  
-  // 优化：对于非常小的区域，直接检查所有像素（避免采样遗漏）
-  if (w <= 20 && h <= 20) {
-    // 小区域：检查所有像素
-    for (let py = 0; py < h; py++) {
-      const globalY = topBound + py;
-      if (globalY >= height) break;
-      
-      for (let px = 0; px < w; px++) {
-        const globalX = leftBound + px;
-        if (globalX >= width) break;
-        
-        const index = (globalY * collisionWidth + globalX) * 4;
-        if (index + 3 < collisionData.length) {
-          const alpha = collisionData[index + 3];
-          if (alpha > 10) {
-            return true; // 快速返回，避免继续检查
-          }
-        }
+  for (let j = 0; j < h; j++) {
+    let seen = false;
+    for (let i = 0; i < w; i++) {
+      const pixelIdx = (j * tempCanvas.width + i) << 2;
+      const alpha = pixels[pixelIdx + 3];
+      if (alpha > 0) {
+        const k = w32 * j + (i >> 5);
+        const m = 1 << (31 - (i % 32));
+        sprite[k] |= m;
+        seen = true;
       }
     }
-  } else {
-    // 大区域：采样检查 + 边界点检查
-    // 先检查关键边界点（快速失败）
-    const keyPoints = [
-      [0, 0], [w-1, 0], [0, h-1], [w-1, h-1], 
-      [Math.floor(w/2), Math.floor(h/2)],
-      [Math.floor(w/4), Math.floor(h/4)],
-      [Math.floor(3*w/4), Math.floor(3*h/4)]
-    ];
+    if (seen) {
+      if (firstSeenRow === -1) firstSeenRow = j;
+      seenRow = j;
+    }
+  }
+  
+  spriteCtx.restore();
+  
+  // 如果没有任何内容，返回空sprite
+  if (firstSeenRow === -1 || seenRow === -1) {
+    return {
+      sprite: new Uint32Array(0),
+      width: w,
+      height: 0,
+      x0: -w >> 1,
+      y0: -h >> 1,
+      x1: w >> 1,
+      y1: h >> 1
+    };
+  }
+  
+  // 裁剪sprite到实际内容区域
+  const actualH = seenRow - firstSeenRow + 1;
+  const croppedSprite = new Uint32Array(w32 * actualH);
+  for (let j = 0; j < actualH; j++) {
+    for (let i = 0; i < w32; i++) {
+      croppedSprite[j * w32 + i] = sprite[(firstSeenRow + j) * w32 + i];
+    }
+  }
+  
+  // 计算边界框（相对于文字中心点）
+  // 文字中心点在 (w/2, h/2)，实际内容从 firstSeenRow 到 seenRow
+  const centerY = h >> 1;
+  const x0 = -w >> 1;
+  const y0 = firstSeenRow - centerY;
+  const x1 = w >> 1;
+  const y1 = seenRow - centerY + 1; // +1 因为seenRow是最后一个有内容的行
+  
+  return {
+    sprite: croppedSprite,
+    width: w,
+    height: actualH,
+    x0,
+    y0,
+    x1,
+    y1
+  };
+};
+
+/**
+ * 初始化位图板（board）
+ * @param {number} width - 画布宽度
+ * @param {number} height - 画布高度
+ * @returns {Uint32Array} 位图板数组
+ */
+const initBitmapBoard = (width, height) => {
+  // board大小：(width/32) * height，每个元素是32位整数
+  const boardSize = Math.ceil(width / 32) * height;
+  return new Uint32Array(boardSize);
+};
+
+/**
+ * 使用位运算检测碰撞（基于d3-cloud算法）
+ * @param {Object} tag - 标签对象，包含 {sprite, width, height, x, y, x0, y0, x1, y1}
+ * @param {Uint32Array} board - 位图板
+ * @param {number} boardWidth - 画布宽度
+ * @param {number} boardHeight - 画布高度
+ * @returns {boolean} 是否碰撞
+ */
+const checkCollisionWithBitmap = (tag, board, boardWidth, boardHeight) => {
+  const { sprite, width, height, x, y, x0, y0 } = tag;
+  
+  if (!sprite || sprite.length === 0) {
+    return true; // 如果没有sprite，认为碰撞（避免放置）
+  }
+  
+  const w = width >> 5; // 宽度（32位为单位）
+  const sw = boardWidth >> 5; // 画布宽度（32位为单位）
+  const lx = x - (w << 4); // 左边界（对齐到32位边界）
+  const sx = lx & 0x7f; // x偏移（0-127）
+  const msx = 32 - sx; // 右移量
+  
+  const h = height;
+  const startY = y + y0;
+  const endY = startY + h;
+  
+  // 边界检查：确保不越界
+  if (startY < 0 || endY > boardHeight || lx < 0 || (lx >> 5) + w + 1 > sw) {
+    return true; // 越界视为碰撞
+  }
+  
+  let xIdx = startY * sw + (lx >> 5); // board中的起始索引
+  let last = 0;
+  
+  // 遍历sprite的每一行
+  for (let j = 0; j < h; j++) {
+    last = 0;
+    // 遍历sprite的每一列（32位为单位）
+    for (let i = 0; i <= w; i++) {
+      const boardIdx = xIdx + i;
+      // 边界检查
+      if (boardIdx < 0 || boardIdx >= board.length) {
+        return true; // 越界视为碰撞
+      }
+      
+      // 计算当前32位块的掩码
+      const spriteValue = i < w ? sprite[j * w + i] : 0;
+      const mask = (last << msx) | (i < w ? (spriteValue >>> sx) : 0);
+      
+      // 检查与board的碰撞（位与操作）
+      if (mask & board[boardIdx]) {
+        return true; // 碰撞
+      }
+      
+      last = spriteValue;
+    }
+    xIdx += sw; // 移动到下一行
+  }
+  
+  return false; // 无碰撞
+};
+
+/**
+ * 将标签的sprite写入位图板
+ * @param {Object} tag - 标签对象
+ * @param {Uint32Array} board - 位图板
+ * @param {number} boardWidth - 画布宽度
+ * @param {number} boardHeight - 画布高度
+ */
+const placeTagOnBoard = (tag, board, boardWidth, boardHeight) => {
+  const { sprite, width, height, x, y, x0, y0 } = tag;
+  
+  if (!sprite || sprite.length === 0) {
+    return;
+  }
+  
+  const w = width >> 5; // 宽度（32位为单位）
+  const sw = boardWidth >> 5; // 画布宽度（32位为单位）
+  const lx = x - (w << 4); // 左边界（对齐到32位边界）
+  const sx = lx & 0x7f; // x偏移（0-127）
+  const msx = 32 - sx; // 右移量
+  
+  const h = height;
+  const startY = y + y0;
+  const endY = startY + h;
+  
+  // 边界检查：确保不越界
+  if (startY < 0 || endY > boardHeight || lx < 0 || (lx >> 5) + w + 1 > sw) {
+    return; // 越界，不写入
+  }
+  
+  let xIdx = startY * sw + (lx >> 5); // board中的起始索引
+  let last = 0;
+  
+  // 遍历sprite的每一行
+  for (let j = 0; j < h; j++) {
+    last = 0;
+    // 遍历sprite的每一列（32位为单位）
+    for (let i = 0; i <= w; i++) {
+      const boardIdx = xIdx + i;
+      // 边界检查
+      if (boardIdx >= 0 && boardIdx < board.length) {
+        // 计算当前32位块的掩码
+        const spriteValue = i < w ? sprite[j * w + i] : 0;
+        const mask = (last << msx) | (i < w ? (spriteValue >>> sx) : 0);
+        
+        // 将掩码写入board（位或操作）
+        board[boardIdx] |= mask;
+      }
+      
+      last = i < w ? sprite[j * w + i] : 0;
+    }
+    xIdx += sw; // 移动到下一行
+  }
+};
+
+/**
+ * 检查矩形是否与已放置的标签碰撞（保留此函数用于边界框预检查）
+ * @param {Array} placedWords - 已放置的标签数组 [{x, y, width, height}, ...]
+ * @param {number} x - 新标签的x坐标
+ * @param {number} y - 新标签的y坐标
+ * @param {number} width - 新标签的宽度
+ * @param {number} height - 新标签的高度
+ * @param {number} padding - 标签之间的间距
+ * @returns {boolean} 是否碰撞
+ */
+const checkCollision = (placedWords, x, y, width, height, padding = 2) => {
+  for (const word of placedWords) {
+    const dx = Math.abs(x - word.x);
+    const dy = Math.abs(y - word.y);
+    const minDistX = (width + word.width) / 2 + padding;
+    const minDistY = (height + word.height) / 2 + padding;
     
-    for (const [px, py] of keyPoints) {
-      const globalX = leftBound + px;
-      const globalY = topBound + py;
-      
-      if (globalX >= 0 && globalX < width && globalY >= 0 && globalY < height) {
-        const index = (globalY * collisionWidth + globalX) * 4;
-        if (index + 3 < collisionData.length) {
-          const alpha = collisionData[index + 3];
-          if (alpha > 10) {
-            return true; // 快速返回
-          }
-        }
-      }
-    }
-    
-    // 如果关键点都通过，再进行采样检查
-    for (let py = 0; py < h; py += effectiveSampleRate) {
-      const globalY = topBound + py;
-      if (globalY >= height) break;
-      
-      for (let px = 0; px < w; px += effectiveSampleRate) {
-        const globalX = leftBound + px;
-        if (globalX >= width) break;
-        
-        // 跳过已经检查过的关键点
-        const isKeyPoint = keyPoints.some(([kx, ky]) => kx === px && ky === py);
-        if (isKeyPoint) continue;
-        
-        const index = (globalY * collisionWidth + globalX) * 4;
-        if (index + 3 < collisionData.length) {
-          const alpha = collisionData[index + 3];
-          if (alpha > 10) {
-            return true; // 快速返回
-          }
-        }
-      }
+    if (dx < minDistX && dy < minDistY) {
+      return true;
     }
   }
-  
   return false;
 };
 
 /**
- * 将文字绘制到碰撞检测canvas上（用于后续碰撞检测）
+ * 测量文字尺寸
+ * @param {CanvasRenderingContext2D} ctx - canvas上下文
  * @param {string} text - 文字内容
- * @param {number} x - 文字中心x坐标
- * @param {number} y - 文字中心y坐标
- * @param {number} size - 字体大小
- * @param {string} fontFamily - 字体族
- * @param {string} fontWeight - 字重
- * @param {CanvasRenderingContext2D} collisionCtx - 碰撞检测canvas的上下文
- * @param {number} width - 画布宽度
- * @param {number} height - 画布高度
+ * @param {string} font - 字体样式字符串
+ * @returns {Object} {width, height}
  */
-const drawTextToCollisionCanvas = (text, x, y, size, fontFamily, fontWeight, collisionCtx, width, height) => {
-  if (!collisionCtx || !collisionData || collisionWidth === 0) return;
-  
-  // 先测量文字尺寸，确定需要更新的区域
-  collisionCtx.save();
-  collisionCtx.font = `${fontWeight} ${size}px ${fontFamily}`;
-  const metrics = collisionCtx.measureText(text);
-  const textWidth = metrics.width;
-  const textHeight = size;
-  collisionCtx.restore();
-  
-  // 计算文字边界框（添加边距以确保覆盖所有像素）
-  const margin = 3; // 增加边距，确保覆盖抗锯齿产生的边缘像素
-  const left = Math.max(0, Math.floor(x - textWidth/2 - margin));
-  const right = Math.min(width, Math.ceil(x + textWidth/2 + margin));
-  const top = Math.max(0, Math.floor(y - textHeight/2 - margin));
-  const bottom = Math.min(height, Math.ceil(y + textHeight/2 + margin));
-  
-  // 绘制文字到canvas
-  collisionCtx.save();
-  collisionCtx.font = `${fontWeight} ${size}px ${fontFamily}`;
-  collisionCtx.textAlign = 'center';
-  collisionCtx.textBaseline = 'middle';
-  // 使用不透明黑色，便于像素检测
-  collisionCtx.fillStyle = 'rgba(0, 0, 0, 255)';
-  // 禁用文字平滑，确保像素级精确检测
-  collisionCtx.imageSmoothingEnabled = false;
-  collisionCtx.fillText(text, x, y);
-  collisionCtx.restore();
-  
-  // 只获取文字所在区域的像素数据（性能优化）
-  if (left < right && top < bottom) {
-    const regionWidth = right - left;
-    const regionHeight = bottom - top;
-    
-    try {
-      // 获取局部区域的像素数据
-      const regionImageData = collisionCtx.getImageData(left, top, regionWidth, regionHeight);
-      const regionData = regionImageData.data;
-      
-      // 将局部数据更新到全局缓存数组中
-      for (let py = 0; py < regionHeight; py++) {
-        for (let px = 0; px < regionWidth; px++) {
-          const srcIndex = (py * regionWidth + px) * 4;
-          const globalY = top + py;
-          const globalX = left + px;
-          
-          // 确保坐标在有效范围内
-          if (globalX >= 0 && globalX < width && globalY >= 0 && globalY < height) {
-            const dstIndex = (globalY * collisionWidth + globalX) * 4;
-            
-            // 确保索引在有效范围内
-            if (dstIndex + 3 < collisionData.length && srcIndex + 3 < regionData.length) {
-              // 更新RGBA四个通道
-              collisionData[dstIndex] = regionData[srcIndex];         // R
-              collisionData[dstIndex + 1] = regionData[srcIndex + 1]; // G
-              collisionData[dstIndex + 2] = regionData[srcIndex + 2]; // B
-              collisionData[dstIndex + 3] = regionData[srcIndex + 3]; // A
-            }
-          }
-        }
-      }
-    } catch (e) {
-      // 如果局部更新失败，回退到全量更新（保守策略）
-      console.warn('局部像素数据更新失败，回退到全量更新:', e);
-      updateCollisionImageData(collisionCtx, width, height);
-    }
-  }
+const measureText = (ctx, text, font) => {
+  ctx.save();
+  ctx.font = font;
+  const metrics = ctx.measureText(text);
+  const width = metrics.width;
+  // 使用实际测量高度，如果没有则估算
+  const height = metrics.actualBoundingBoxAscent + metrics.actualBoundingBoxDescent || 
+                 parseInt(font.match(/\d+/)?.[0] || '16') * 1.2;
+  ctx.restore();
+  return { width, height };
 };
 
 /**
- * 词云布局：在Voronoi区域内放置POI标签（使用优化的螺旋布局算法）
- * @param {Object} site - 站点信息（包含city, x, y, weight）
- * @param {Array} allSites - 所有站点数组
- * @param {Array} poiList - 该城市的POI列表
- * @param {Map} regionMap - 区域映射
+ * 使用阿基米德螺线算法布局词云（使用位图掩码碰撞检测）
+ * @param {CanvasRenderingContext2D} ctx - canvas上下文
+ * @param {string} city - 城市名
+ * @param {Array} poiData - POI数据数组 [{text, rankInChina}, ...]
+ * @param {Uint8Array} regionPixelMap - 区域像素映射
+ * @param {number} cityIndex - 城市索引
+ * @param {Object} centroid - 质心坐标 {cx, cy}
  * @param {number} width - 画布宽度
  * @param {number} height - 画布高度
- * @param {CanvasRenderingContext2D} ctx - Canvas上下文（用于测量文字）
- * @param {CanvasRenderingContext2D} collisionCtx - 碰撞检测canvas的上下文
- * @param {Array} cityOrder - 城市顺序数组（用于获取城市序号）
- * @returns {Array} 已放置的词云项数组
+ * @param {Object} fontSettings - 字体设置
+ * @param {number} colorIndex - 颜色索引（用于从poiStore.Colors获取颜色）
  */
-const layoutWordCloud = (site, allSites, poiList, regionMap, width, height, ctx, collisionCtx, cityOrder = []) => {
-  if (!poiList || poiList.length === 0) {
-    return [];
-  }
+const layoutWordCloudWithSpiral = (ctx, city, poiData, regionPixelMap, cityIndex, centroid, width, height, fontSettings, colorIndex) => {
+  // 准备词云数据：POI + 城市名
+  const words = [];
   
-  // 获取城市名称和字体设置
-  const cityName = site.city;
-  const fontSettings = poiStore.fontSettings;
-  const minFontSize = fontSettings.minFontSize || 10;
-  const maxFontSize = fontSettings.maxFontSize || 40;
-  const fontFamily = fontSettings.fontFamily || 'Arial';
-  const fontWeight = fontSettings.fontWeight || '700';
-  const language = fontSettings.language || 'zh';
-  const showCityIndex = fontSettings.showCityIndex || false;
-  
-  // 处理城市名：根据语言转换为拼音，并根据序号添加前缀
-  let displayCityName = cityName;
-  
-  // 如果是英文模式，转换为拼音
-  if (language === 'en') {
-    displayCityName = cityNameToPinyin(cityName);
-  }
-  
-  // 如果需要显示序号，添加序号前缀
-  if (showCityIndex && cityOrder.length > 0) {
-    const cityIndex = cityOrder.indexOf(cityName);
-    if (cityIndex >= 0) {
-      displayCityName = `${cityIndex + 1}. ${displayCityName}`;
-    }
-  }
-  
-  // 将城市名也加入词云，城市名使用较大字体
-  const cityWord = {
-    text: displayCityName,
-    popularity: 100, // 城市名权重最高
-    isCity: true,
-    city: cityName // 保存原始城市名（用于后续快速重绘时重新生成显示文本）
-  };
-  
-  // 其他POI按排名排序（排名越小，权重越大）
-  // 注意：compiledData中的POI数据结构是 { text, rankInChina, city }，不是 { pname, rankInCity }
-  // 过滤出真正属于当前城市的POI（解决重名景点被错误分配到其他城市的问题）
-  const filteredPOIs = poiList.filter(poi => {
-    // 如果POI有city字段，验证是否匹配当前城市
-    if (poi.city !== undefined) {
-      return poi.city === cityName;
-    }
-    // 如果没有city字段（兼容旧数据），保留该POI（但会记录警告）
-    console.warn(`POI "${poi.text}" 缺少city字段，无法验证是否属于城市 ${cityName}`);
-    return true;
-  });
-  
-  const sortedPOIs = [...filteredPOIs].sort((a, b) => {
-    const rankA = parseInt(a.rankInChina) || 100000;
-    const rankB = parseInt(b.rankInChina) || 100000;
-    return rankA - rankB;
-  });
-  
-  // 如果过滤后没有POI，记录警告
-  if (filteredPOIs.length < poiList.length) {
-    const filteredCount = poiList.length - filteredPOIs.length;
-    console.warn(`城市 ${cityName}: 过滤掉了 ${filteredCount} 个不属于该城市的POI（可能是重名景点）`);
-  }
-  
-  // 计算popularity的范围（用于映射到字体大小）
-  // 使用循环计算最小值和最大值，避免堆栈溢出
-  let minRank = 100000;
-  let maxRank = 1;
-  if (sortedPOIs.length > 0) {
-    for (const poi of sortedPOIs) {
-      const rank = parseInt(poi.rankInChina) || 100000;
-      if (rank < minRank) minRank = rank;
-      if (rank > maxRank) maxRank = rank;
-    }
-  }
+  // 计算所有POI的排名范围（用于归一化）
+  const ranks = poiData.length > 0 
+    ? poiData.map(poi => parseInt(poi.rankInChina) || 100000)
+    : [100000];
+  const minRank = ranks.length > 0 ? Math.min(...ranks) : 1;
+  const maxRank = ranks.length > 0 ? Math.max(...ranks) : 100000;
   const rankRange = maxRank - minRank || 1;
   
-  // 处理所有词，城市名使用maxFontSize，其他POI映射到minFontSize到maxFontSize-10
-  const words = [cityWord, ...sortedPOIs].map(poi => {
-    let size;
-    if (poi.isCity) {
-      // 城市名使用最大字体
-      size = maxFontSize;
-    } else {
-      // 其他POI按排名映射到字体大小（排名越小，字体越大）
-      const rank = parseInt(poi.rankInChina) || 100000;
-      const normalizedRank = (rank - minRank) / rankRange;
-      size = minFontSize + (1 - normalizedRank) * (maxFontSize - minFontSize - 10);
-    }
-    return {
-      text: poi.isCity ? poi.text : poi.text, // compiledData中使用的是text字段
-      size: Math.max(minFontSize, Math.min(maxFontSize, size)),
-      popularity: poi.isCity ? 100 : (100 - (parseInt(poi.rankInChina) || 100000)),
-      isCity: poi.isCity || false,
-      city: poi.isCity ? cityName : (poi.city || cityName) // 保存城市信息，确保重名景点能正确识别
-    };
-  }).sort((a, b) => b.size - a.size); // 按大小排序，先放大的
+  // 设置字体
+  const fontFamily = fontSettings.fontFamily || 'Arial';
+  const fontWeight = fontSettings.fontWeight || '700';
   
-  const placed = [];
-  const padding = 5;
-  
-  // 使用区域的形心作为螺旋布局中心
-  // 从finalCityCentersForText获取形心，如果没有则使用站点位置
-  let centerX = site.x;
-  let centerY = site.y;
-  
-  // 尝试从区域映射中找到区域的中心点
-  if (regionMap && regionMap.has(cityName)) {
-    const pixels = Array.from(regionMap.get(cityName));
-    if (pixels.length > 0) {
-      let sumX = 0, sumY = 0;
-      pixels.forEach(pixelKey => {
-        const [px, py] = pixelKey.split(',').map(Number);
-        sumX += px;
-        sumY += py;
-      });
-      centerX = sumX / pixels.length;
-      centerY = sumY / pixels.length;
-    }
-  }
-  
-  // 性能优化：记录难以摆放的标签的最小空间大小（面积）
-  // 如果某个标签在所有策略都失败后，记录其空间大小
-  // 后续如果遇到更大的标签，直接跳过，避免无效尝试
-  let minFailedArea = Infinity; // 记录难以摆放的标签的最小面积
-  
-  for (let word of words) {
-    // 测量文字尺寸（使用缓存）
-    const cacheKey = `${word.text}_${word.size}_${fontFamily}_${fontWeight}`;
-    let textWidth, textHeight;
-    
-    if (fontMetricsCache.has(cacheKey)) {
-      const cached = fontMetricsCache.get(cacheKey);
-      textWidth = cached.width;
-      textHeight = cached.height;
-    } else {
-      ctx.font = `${fontWeight} ${word.size}px ${fontFamily}`;
-      const metrics = ctx.measureText(word.text);
-      textWidth = metrics.width;
-      textHeight = word.size;
-      fontMetricsCache.set(cacheKey, { width: textWidth, height: textHeight });
-    }
-    
-    // 根据标签大小调整边界检查的严格程度
-    const margin = word.size < 15 ? 1 : (word.size < 30 ? 2 : 3);
-    
-    // 计算实际需要的空间大小（包括边距）
-    const actualWidth = textWidth + margin * 2;
-    const actualHeight = textHeight + margin * 2;
-    const actualArea = actualWidth * actualHeight;
-    
-    // 性能优化：如果当前标签的实际空间大小大于已记录的最小失败空间大小，直接跳过
-    if (actualArea > minFailedArea) {
-      // console.log(`城市 ${cityName}: 标签 "${word.text}" (${word.size.toFixed(1)}px, 实际面积=${actualArea.toFixed(0)}) 空间过大，跳过（已记录最小失败面积=${minFailedArea.toFixed(0)}）`);
-      continue;
-    }
-    
-    let placedWord = false;
-    
-    // 策略1：螺旋搜索（从中心向外）- 优化：增加步长，减少尝试次数
-    let spiralRadius = 0;
-    let angle = 0;
-    const angleStep = 0.4; // 从0.25增加到0.4，减少角度步数
-    const radiusStep = 1.5; // 从1.2增加到1.5，加快半径增长
-    
-    const maxSpiralRadius = Math.max(width, height) * 1.2;
-    const maxSpiralAttempts = 1500; // 从3000减少到1500
-    let spiralAttempts = 0;
-    
-    // 快速跳过策略：如果连续多次失败，增加步长
-    let consecutiveFailures = 0;
-    const failureThreshold = 50; // 连续失败50次后增加步长
-    
-    while (!placedWord && spiralRadius < maxSpiralRadius && spiralAttempts < maxSpiralAttempts) {
-      spiralAttempts++;
-      const x = centerX + spiralRadius * Math.cos(angle);
-      const y = centerY + spiralRadius * Math.sin(angle);
-      
-      // 优化：按性能从快到慢的顺序进行检查，快速失败
-      // 1. 最快：检查是否在画布内（简单数值比较）
-      if (x < 0 || x > width || y < 0 || y > height) {
-        consecutiveFailures++;
-        angle += angleStep * (consecutiveFailures > failureThreshold ? 2 : 1);
-        spiralRadius += radiusStep * 0.08 * (consecutiveFailures > failureThreshold ? 2 : 1);
-        continue;
-      }
-      
-      // 2. 中等：检查是否在区域内（Map查找，O(1)）
-      if (!isTextInCityRegion(x, y, textWidth, textHeight, cityName, regionMap, width, height, margin)) {
-        consecutiveFailures++;
-        angle += angleStep * (consecutiveFailures > failureThreshold ? 2 : 1);
-        spiralRadius += radiusStep * 0.08 * (consecutiveFailures > failureThreshold ? 2 : 1);
-        continue;
-      }
-      
-      // 3. 最慢：像素级碰撞检测（数组读取，但已优化为缓存）
-      // 使用更严格的采样率（2）确保检测准确性
-      if (checkPixelCollision(x, y, textWidth, textHeight, width, height, 2)) {
-        consecutiveFailures++;
-        angle += angleStep * (consecutiveFailures > failureThreshold ? 2 : 1);
-        spiralRadius += radiusStep * 0.08 * (consecutiveFailures > failureThreshold ? 2 : 1);
-        continue;
-      }
-      
-      // 找到合适位置，重置失败计数
-      consecutiveFailures = 0;
-      
-      // 找到合适位置，添加到已放置列表并绘制到碰撞canvas
-      // 保存POI的城市信息，确保后续能正确识别
-      const poiCity = word.city || cityName; // 如果word有city字段，使用它；否则使用当前城市
-      placed.push({
-        text: word.text,
-        x: x,
-        y: y,
-        size: word.size,
-        width: textWidth,
-        height: textHeight,
-        popularity: word.popularity,
-        isCity: word.isCity,
-        city: poiCity // 保存城市信息
-      });
-      
-      // 将文字绘制到碰撞检测canvas上，用于后续碰撞检测
-      if (collisionCtx) {
-        drawTextToCollisionCanvas(word.text, x, y, word.size, fontFamily, fontWeight, collisionCtx, width, height);
-      }
-      
-      placedWord = true;
-    }
-    
-    // 策略2：如果螺旋搜索失败，使用网格搜索
-    if (!placedWord && regionMap && regionMap.has(cityName)) {
-      const pixels = Array.from(regionMap.get(cityName));
-      if (pixels.length > 0) {
-        // 使用循环计算最小值和最大值，避免堆栈溢出
-        let minX = Infinity, maxX = -Infinity;
-        let minY = Infinity, maxY = -Infinity;
-        
-        for (const pixelKey of pixels) {
-          const [px, py] = pixelKey.split(',').map(Number);
-          if (px < minX) minX = px;
-          if (px > maxX) maxX = px;
-          if (py < minY) minY = py;
-          if (py > maxY) maxY = py;
-        }
-        
-        // 限制在画布范围内
-        minX = Math.max(0, minX);
-        maxX = Math.min(width, maxX);
-        minY = Math.max(0, minY);
-        maxY = Math.min(height, maxY);
-        
-        // 检查边界框是否有效
-        if (minX >= maxX || minY >= maxY) {
-          // 边界框无效，跳过网格搜索
-          continue;
-        }
-        
-        const gridSize = Math.max(textWidth, textHeight) * 1.5;
-        const cols = Math.ceil((maxX - minX) / gridSize);
-        const rows = Math.ceil((maxY - minY) / gridSize);
-        const maxGridAttempts = Math.min(cols * rows, 500);
-        
-        let gridAttempts = 0;
-        for (let r = 0; r < rows && !placedWord && gridAttempts < maxGridAttempts; r++) {
-          for (let c = 0; c < cols && !placedWord && gridAttempts < maxGridAttempts; c++) {
-            gridAttempts++;
-            const x = minX + c * gridSize + gridSize * 0.5;
-            const y = minY + r * gridSize + gridSize * 0.5;
-            
-            const offsetX = (Math.random() - 0.5) * gridSize * 0.3;
-            const offsetY = (Math.random() - 0.5) * gridSize * 0.3;
-            const testX = x + offsetX;
-            const testY = y + offsetY;
-            
-            if (testX < 0 || testX > width || testY < 0 || testY > height) {
-              continue;
-            }
-            
-            if (!isTextInCityRegion(testX, testY, textWidth, textHeight, cityName, regionMap, width, height, margin)) {
-              continue;
-            }
-            
-            // 使用像素级碰撞检测（使用缓存的像素数据）
-            // 使用更严格的采样率（2）确保检测准确性
-            if (checkPixelCollision(testX, testY, textWidth, textHeight, width, height, 2)) {
-              continue;
-            }
-            
-            // 找到合适位置，添加到已放置列表并绘制到碰撞canvas
-            const poiCity = word.city || cityName; // 如果word有city字段，使用它；否则使用当前城市
-            placed.push({
-              text: word.text,
-              x: testX,
-              y: testY,
-              size: word.size,
-              width: textWidth,
-              height: textHeight,
-              popularity: word.popularity,
-              isCity: word.isCity,
-              city: poiCity // 保存城市信息
-            });
-            
-            // 将文字绘制到碰撞检测canvas上，用于后续碰撞检测
-            if (collisionCtx) {
-              drawTextToCollisionCanvas(word.text, testX, testY, word.size, fontFamily, fontWeight, collisionCtx, width, height);
-            }
-            
-            placedWord = true;
-          }
-        }
-      }
-    }
-    
-    // 策略3：如果网格搜索也失败，使用随机搜索（最后备用策略）
-    if (!placedWord && regionMap && regionMap.has(cityName)) {
-      const pixels = Array.from(regionMap.get(cityName));
-      if (pixels.length > 0) {
-        // 计算区域的边界框
-        let minX = Infinity, maxX = -Infinity;
-        let minY = Infinity, maxY = -Infinity;
-        
-        for (const pixelKey of pixels) {
-          const [px, py] = pixelKey.split(',').map(Number);
-          if (px < minX) minX = px;
-          if (px > maxX) maxX = px;
-          if (py < minY) minY = py;
-          if (py > maxY) maxY = py;
-        }
-        
-        // 限制在画布范围内
-        minX = Math.max(0, minX);
-        maxX = Math.min(width, maxX);
-        minY = Math.max(0, minY);
-        maxY = Math.min(height, maxY);
-        
-        // 检查边界框是否有效
-        if (minX < maxX && minY < maxY) {
-          // 随机搜索：在区域内随机选择位置
-          // 基础尝试次数：500次，小文字（<20px）加倍
-          const baseAttempts = 500;
-          const maxAttempts = word.size < 20 ? baseAttempts * 2 : baseAttempts;
-          
-          for (let attempt = 0; attempt < maxAttempts && !placedWord; attempt++) {
-            // 在区域内随机选择位置
-            const testX = minX + Math.random() * (maxX - minX);
-            const testY = minY + Math.random() * (maxY - minY);
-            
-            // 快速检查是否在画布内
-            if (testX < 0 || testX > width || testY < 0 || testY > height) {
-              continue;
-            }
-            
-            // 检查是否在区域内
-            if (!isTextInCityRegion(testX, testY, textWidth, textHeight, cityName, regionMap, width, height, margin)) {
-              continue;
-            }
-            
-            // 使用像素级碰撞检测
-            if (checkPixelCollision(testX, testY, textWidth, textHeight, width, height, 2)) {
-              continue;
-            }
-            
-            // 找到合适位置
-            const poiCity = word.city || cityName; // 如果word有city字段，使用它；否则使用当前城市
-            placed.push({
-              text: word.text,
-              x: testX,
-              y: testY,
-              size: word.size,
-              width: textWidth,
-              height: textHeight,
-              popularity: word.popularity,
-              isCity: word.isCity,
-              city: poiCity // 保存城市信息
-            });
-            
-            // 将文字绘制到碰撞检测canvas上
-            if (collisionCtx) {
-              drawTextToCollisionCanvas(word.text, testX, testY, word.size, fontFamily, fontWeight, collisionCtx, width, height);
-            }
-            
-            placedWord = true;
-          }
-        }
-      }
-    }
-    
-    // 性能优化：如果所有策略都失败，记录该标签的实际空间大小（包括边距）
-    // 如果当前标签的实际空间大小小于已记录的最小失败空间大小，更新记录
-    if (!placedWord) {
-      if (actualArea < minFailedArea) {
-        minFailedArea = actualArea;
-        // console.log(`城市 ${cityName}: 标签 "${word.text}" (${word.size.toFixed(1)}px, 实际面积=${actualArea.toFixed(0)}) 所有策略都失败，更新最小失败面积为 ${minFailedArea.toFixed(0)}`);
-      }
-    }
-  }
-  
-  return placed;
-};
-
-/**
- * 绘制词云到各个Voronoi子区域
- * @param {CanvasRenderingContext2D} ctx - Canvas上下文（用于测量文字）
- * @param {CanvasRenderingContext2D} collisionCtx - 碰撞检测canvas的上下文
- * @param {Array} sites - 站点数组
- * @param {Array} cityOrder - 城市顺序
- * @param {Object} data - 编译后的数据（按城市分组）
- * @param {number} width - 画布宽度
- * @param {number} height - 画布高度
- * @param {Array} colorIndices - 颜色索引数组（可选，用于确保文字颜色与背景颜色一致）
- */
-const drawWordCloudInRegions = async (ctx, collisionCtx, sites, cityOrder, data, width, height, colorIndices = null) => {
-  if (!currentRegionMap) {
-    console.warn('区域映射未生成，无法绘制词云');
-    return;
-  }
-  
-  console.log('开始绘制词云...');
-
-  // 初始化遮罩进度信息（按城市粒度）
-  loadingStage.value = '正在为各个城市布局标签…';
-  loadingTotalCities.value = sites.length;
-  loadingCurrentIndex.value = 0;
-  loadingCurrentCity.value = '';
-  
-  // 清空碰撞检测canvas和缓存
-  if (collisionCtx) {
-    collisionCtx.clearRect(0, 0, width, height);
-    // 初始化像素数据缓存
-    updateCollisionImageData(collisionCtx, width, height);
-  }
-  
-  // 清空字体测量缓存（每次重新生成时清空）
-  fontMetricsCache.clear();
-  
-  // 为每个城市生成词云
-  const allWordCloud = [];
-  for (let siteIndex = 0; siteIndex < sites.length; siteIndex++) {
-    const site = sites[siteIndex];
-
-    // 更新遮罩上的当前城市与进度信息
-    loadingCurrentCity.value = site.city || '';
-    loadingCurrentIndex.value = siteIndex + 1;
-
-    const cityPOIs = data[site.city] || [];
-    if (cityPOIs.length === 0) {
-      console.warn(`城市 ${site.city} 没有POI数据`);
-      continue;
-    }
-    
-    const wordCloud = layoutWordCloud(site, sites, cityPOIs, currentRegionMap, width, height, ctx, collisionCtx, cityOrder);
-    allWordCloud.push(...wordCloud);
-    console.log(`城市 ${site.city}: 放置了 ${wordCloud.length} 个标签`);
-    
-    // 让出一帧，刷新遮罩显示
-    if (siteIndex % 1 === 0) {
-      await nextTick();
-      await waitNextFrame();
-    }
-  }
-  
-  // 创建POI到城市的映射（用于快速查找）
-  // 使用 city+text 组合作为key，解决重名景点问题
-  const poiToCityMap = new Map();
-  const poiKeyToCityMap = new Map(); // 使用唯一key（city+text）映射到城市
-  cityOrder.forEach(cityName => {
-    const cityPOIs = data[cityName] || [];
-    cityPOIs.forEach(poi => {
-      // 如果POI有city字段，使用它；否则使用当前城市名（兼容旧数据）
-      const poiCity = poi.city !== undefined ? poi.city : cityName;
-      // 使用 city+text 作为唯一key，避免重名冲突
-      const uniqueKey = `${poiCity}|${poi.text}`;
-      poiKeyToCityMap.set(uniqueKey, poiCity);
-      // 同时保留简单的text映射（用于向后兼容，但可能被重名覆盖）
-      // 优先使用有city字段的POI
-      if (!poiToCityMap.has(poi.text) || poi.city === cityName) {
-        poiToCityMap.set(poi.text, poiCity);
-      }
+  // 添加POI数据
+  poiData.forEach(poi => {
+    const rank = parseInt(poi.rankInChina) || 100000;
+    // 根据排名计算字号（排名越小，字号越大）
+    // 使用对数归一化
+    const normalizedRank = (rank - minRank) / rankRange;
+    const fontSize = fontSettings.minFontSize + 
+      (fontSettings.maxFontSize - fontSettings.minFontSize) * (1 - normalizedRank);
+    words.push({
+      text: poi.text,
+      size: Math.max(fontSettings.minFontSize, Math.min(fontSettings.maxFontSize, fontSize)),
+      isCity: false,
+      fontFamily,
+      fontWeight
     });
   });
   
-  // 保存布局信息（用于后续快速重绘）
-  // 创建颜色索引映射（必须使用图着色算法的颜色索引，确保相邻区域不同颜色）
-  const colorIndicesMap = new Map();
-  if (colorIndices && colorIndices.length === cityOrder.length) {
-    // 使用提供的颜色索引（来自图着色算法）
-    cityOrder.forEach((city, cityIndex) => {
-      colorIndicesMap.set(city, colorIndices[cityIndex]);
-    });
-  } else {
-    // 如果没有提供颜色索引，报错（不应该发生，因为必须使用图着色算法）
-    console.error('错误：drawWordCloudInRegions 未接收到颜色索引，无法确保颜色一致性');
-    // 使用循环分配作为最后的回退（但这不是理想情况）
-    cityOrder.forEach((city, cityIndex) => {
-      colorIndicesMap.set(city, cityIndex % poiStore.Colors.length);
-    });
+  // 添加城市名（字号比最大字号稍大）
+  const maxSize = words.length > 0 
+    ? Math.max(...words.map(w => w.size)) 
+    : fontSettings.maxFontSize;
+  const cityFontSize = Math.min(maxSize * 1.2, fontSettings.maxFontSize * 1.5); // 比最大字号大20%，但不超过maxFontSize的1.5倍
+  
+  // 处理城市名：根据语言设置和序号显示设置
+  let cityName = city;
+  // 根据语言设置选择城市名：中文使用原城市名，英文使用拼音
+  if (fontSettings.language === 'en') {
+    cityName = cityNameToPinyin(city);
+  }
+  // 如果需要显示序号，在城市名前添加序号（序号从1开始，cityIndex从0开始）
+  if (fontSettings.showCityIndex) {
+    cityName = `${cityIndex + 1}. ${cityName}`;
   }
   
-  savedWordCloudLayout = {
-    items: allWordCloud.map(item => {
-      // 确定对应的城市
-      let cityName = null;
-      if (item.isCity) {
-        // 对于城市名，item.city 保存的是原始城市名（在 layoutWordCloud 中设置的）
-        cityName = item.city || item.text;
-      } else {
-        // 优先使用item中保存的city字段（如果layoutWordCloud传递了city信息）
-        if (item.city) {
-          cityName = item.city;
-        } else {
-          // 回退到使用映射查找
-          cityName = poiToCityMap.get(item.text);
+  words.push({
+    text: cityName,
+    size: cityFontSize,
+    isCity: true,
+    fontFamily,
+    fontWeight
+  });
+  
+  // 按字号从大到小排序（先放置大字）
+  words.sort((a, b) => b.size - a.size);
+  
+  // ========== 初始化位图掩码碰撞检测系统 ==========
+  
+  // 创建sprite canvas（用于生成位图掩码）
+  const spriteCanvas = document.createElement('canvas');
+  const { context: spriteCtx, ratio: spriteRatio } = getContextAndRatio(spriteCanvas);
+  
+  // 初始化位图板
+  const board = initBitmapBoard(width, height);
+  
+  // 预生成所有标签的sprite（位图掩码）
+  const wordsWithSprites = [];
+  for (const word of words) {
+    try {
+      const spriteData = generateWordSprite(spriteCtx, spriteRatio, word, 1);
+      wordsWithSprites.push({
+        ...word,
+        sprite: spriteData.sprite,
+        spriteWidth: spriteData.width,
+        spriteHeight: spriteData.height,
+        spriteX0: spriteData.x0,
+        spriteY0: spriteData.y0,
+        spriteX1: spriteData.x1,
+        spriteY1: spriteData.y1
+      });
+    } catch (error) {
+      console.warn(`生成标签 "${word.text}" 的sprite失败:`, error);
+      // 如果生成失败，跳过该标签
+      continue;
+    }
+  }
+  
+  // 已放置的标签（用于记录）
+  const placedWords = [];
+  
+  // 阿基米德螺线参数
+  const a = 1; // 螺线参数，控制起始半径
+  const b = 0.5; // 螺线参数，控制螺线密度（值越小，螺线越紧密）
+  const angleStep = 0.05; // 角度步长（更小的步长，更精确）
+  
+  // 布局每个词
+  for (const word of wordsWithSprites) {
+    let placed = false;
+    let attempts = 0;
+    const maxAttempts = 20000; // 最大尝试次数：10000次
+    
+    // 为每个词重置角度（从质心开始）
+    let currentAngle = 0;
+    
+    while (!placed && attempts < maxAttempts) {
+      // 计算螺线上的点：r = a + b * θ
+      const r = a + b * currentAngle;
+      const x = centroid.cx + r * Math.cos(currentAngle);
+      const y = centroid.cy + r * Math.sin(currentAngle);
+      
+      // 检查点是否在区域内
+      if (isPointInRegion(regionPixelMap, cityIndex, x, y, width, height)) {
+        // 检查标签边界框是否完全在区域内
+        const tagX0 = x + word.spriteX0;
+        const tagY0 = y + word.spriteY0;
+        const tagX1 = x + word.spriteX1;
+        const tagY1 = y + word.spriteY1;
+        
+        // 检查四个角是否都在区域内
+        const corners = [
+          { x: tagX0, y: tagY0 },
+          { x: tagX1, y: tagY0 },
+          { x: tagX0, y: tagY1 },
+          { x: tagX1, y: tagY1 }
+        ];
+        
+        const allCornersInRegion = corners.every(corner => 
+          isPointInRegion(regionPixelMap, cityIndex, corner.x, corner.y, width, height)
+        );
+        
+        if (allCornersInRegion) {
+          // 构建标签对象用于碰撞检测
+          const tag = {
+            sprite: word.sprite,
+            width: word.spriteWidth,
+            height: word.spriteHeight,
+            x: Math.round(x),
+            y: Math.round(y),
+            x0: word.spriteX0,
+            y0: word.spriteY0,
+            x1: word.spriteX1,
+            y1: word.spriteY1
+          };
+          
+          // 使用位图掩码碰撞检测
+          if (!checkCollisionWithBitmap(tag, board, width, height)) {
+            // 可以放置，绘制文字
+            ctx.save();
+            const fontStr = `${word.fontWeight} ${Math.round(word.size)}px ${word.fontFamily}`;
+            ctx.font = fontStr;
+            
+            // 根据标签类型设置颜色：城市名保持红色，POI使用配色窗口的颜色
+            // 获取文字配色设置
+            const textColorMode = poiStore.colorSettings.textColorMode || 'multi';
+            const textSingleColor = poiStore.colorSettings.textSingleColor || 'rgb(0, 0, 0)';
+            
+            if (word.isCity) {
+              ctx.fillStyle = '#ff0000'; // 城市名：红色
+            } else {
+              // POI文字：根据文字配色模式设置颜色
+              if (textColorMode === 'single') {
+                ctx.fillStyle = textSingleColor; // 单色模式：使用统一颜色
+              } else {
+                // 复色模式：使用配色窗口的颜色（与背景色同色系）
+                const textColor = poiStore.Colors[colorIndex % poiStore.Colors.length];
+                ctx.fillStyle = textColor;
+              }
+            }
+            
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(word.text, x, y);
+            ctx.restore();
+            
+            // 将标签写入位图板
+            placeTagOnBoard(tag, board, width, height);
+            
+            // 记录已放置的标签
+            placedWords.push({
+              x,
+              y,
+              width: word.spriteWidth,
+              height: word.spriteHeight,
+              text: word.text
+            });
+            
+            placed = true;
+          }
         }
       }
       
-      return {
-        text: item.text,
-        x: item.x,
-        y: item.y,
-        size: item.size,
-        width: item.width,
-        height: item.height,
-        popularity: item.popularity,
-        isCity: item.isCity,
-        city: cityName // 保存原始城市名（对于城市名，这是原始城市名；对于POI，这是所属城市名）
-      };
-    }),
-    sites: sites.map(s => ({ city: s.city, x: s.x, y: s.y })),
-    cityOrder: [...cityOrder],
-    colorIndicesMap: colorIndicesMap // 保存颜色索引映射
+      // 增加角度，继续搜索
+      currentAngle += angleStep;
+      attempts++;
+    }
+    
+    // // 如果maxAttempts次尝试后仍未放置，放弃当前标签，继续下一个
+    // if (!placed) {
+    //   console.warn(`标签 "${word.text}" 在 ${maxAttempts} 次尝试后仍无法放置，已跳过`);
+    // }
+  }
+  
+  // 返回布局信息（包含已放置的标签信息）
+  return {
+    placedCount: placedWords.length,
+    words: placedWords.map(w => ({
+      ...w,
+      isCity: words.find(orig => orig.text === w.text)?.isCity || false,
+      size: words.find(orig => orig.text === w.text)?.size || 0,
+      fontFamily: words.find(orig => orig.text === w.text)?.fontFamily || fontFamily,
+      fontWeight: words.find(orig => orig.text === w.text)?.fontWeight || fontWeight
+    }))
   };
-  
-  // 绘制词云
-  renderWordCloudFromLayout(ctx, savedWordCloudLayout, width, height);
-  
-  console.log(`词云绘制完成，共绘制 ${allWordCloud.length} 个标签`);
 };
 
 /**
- * 使用 d3-cloud-shape 算法绘制词云到各个Voronoi子区域（新算法）
- * @param {CanvasRenderingContext2D} ctx - Canvas上下文（用于测量文字）
- * @param {CanvasRenderingContext2D} collisionCtx - 碰撞检测canvas的上下文（此算法不需要，但保留接口兼容性）
- * @param {Array} sites - 站点数组
+ * 在各个城市子空间内绘制POI词云
+ * @param {CanvasRenderingContext2D} ctx - canvas上下文
+ * @param {Uint8Array} regionPixelMap - 区域像素映射
  * @param {Array} cityOrder - 城市顺序
- * @param {Object} data - 编译后的数据（按城市分组）
+ * @param {Object} compiledData - 编译后的POI数据
  * @param {number} width - 画布宽度
  * @param {number} height - 画布高度
- * @param {Array} colorIndices - 颜色索引数组（可选，用于确保文字颜色与背景颜色一致）
+ * @param {Array} colorIndices - 颜色索引数组，每个城市对应一个颜色索引
  */
-const drawWordCloudInRegionsWithShape = async (ctx, collisionCtx, sites, cityOrder, data, width, height, colorIndices = null) => {
-  if (!savedRegionPixelMap) {
-    console.warn('区域像素映射未生成，无法使用 d3-cloud-shape 算法绘制词云');
-    // 回退到原有算法
-    return await drawWordCloudInRegions(ctx, collisionCtx, sites, cityOrder, data, width, height, colorIndices);
-  }
-  
-  console.log('开始使用 d3-cloud-shape 算法绘制词云...');
-
-  // 初始化遮罩进度信息（按城市粒度）
-  loadingStage.value = '正在为各个城市布局标签（新算法）…';
-  loadingTotalCities.value = sites.length;
-  loadingCurrentIndex.value = 0;
-  loadingCurrentCity.value = '';
-  
-  // 清空字体测量缓存（每次重新生成时清空）
-  fontMetricsCache.clear();
-  
-  // 获取字体设置
+const drawWordCloudsInRegions = async (ctx, regionPixelMap, cityOrder, compiledData, width, height, colorIndices) => {
   const fontSettings = poiStore.fontSettings;
   
-  // 使用 d3-cloud-shape 算法布局词云
-  const allWordCloud = await layoutWordCloudsWithShape(
-    sites,
-    data,
-    savedRegionPixelMap,
-    width,
-    height,
-    cityOrder,
-    fontSettings,
-    (siteIndex, cityName, placedCount) => {
-      // 进度回调
-      loadingCurrentCity.value = cityName || '';
-      loadingCurrentIndex.value = siteIndex + 1;
-      console.log(`城市 ${cityName}: 放置了 ${placedCount} 个标签`);
-      
-      // 让出一帧，刷新遮罩显示
-      if (siteIndex % 1 === 0) {
-        nextTick().then(() => waitNextFrame());
-      }
+  // 保存所有城市的布局信息
+  const wordCloudLayout = {};
+  
+  // 为每个城市绘制词云
+  for (let cityIndex = 0; cityIndex < cityOrder.length; cityIndex++) {
+    const city = cityOrder[cityIndex];
+    const poiData = compiledData[city] || [];
+    
+    // 更新城市进度
+    loadingCurrentIndex.value = cityIndex + 1;
+    loadingCurrentCity.value = city;
+    
+    if (poiData.length === 0) {
+      continue; // 跳过没有POI数据的城市
     }
-  );
-  
-  // 创建POI到城市的映射（用于快速查找）
-  const poiToCityMap = new Map();
-  cityOrder.forEach(cityName => {
-    const cityPOIs = data[cityName] || [];
-    cityPOIs.forEach(poi => {
-      const poiCity = poi.city !== undefined ? poi.city : cityName;
-      if (!poiToCityMap.has(poi.text) || poi.city === cityName) {
-        poiToCityMap.set(poi.text, poiCity);
-      }
-    });
-  });
-  
-  // 保存布局信息（用于后续快速重绘）
-  const colorIndicesMap = new Map();
-  if (colorIndices && colorIndices.length === cityOrder.length) {
-    cityOrder.forEach((city, cityIndex) => {
-      colorIndicesMap.set(city, colorIndices[cityIndex]);
-    });
-  } else {
-    console.error('错误：drawWordCloudInRegionsWithShape 未接收到颜色索引，无法确保颜色一致性');
-    cityOrder.forEach((city, cityIndex) => {
-      colorIndicesMap.set(city, cityIndex % poiStore.Colors.length);
-    });
+    
+    // 获取该城市的颜色索引
+    const colorIndex = colorIndices && colorIndices[cityIndex] !== undefined 
+      ? colorIndices[cityIndex] 
+      : cityIndex % poiStore.Colors.length; // 如果没有提供，使用循环分配
+    
+    // 计算区域质心
+    const centroid = calculateRegionCentroid(regionPixelMap, cityIndex, width, height);
+    
+    // 使用阿基米德螺线算法布局词云
+    const layoutResult = layoutWordCloudWithSpiral(
+      ctx,
+      city,
+      poiData,
+      regionPixelMap,
+      cityIndex,
+      centroid,
+      width,
+      height,
+      fontSettings,
+      colorIndex
+    );
+    
+    // 保存布局信息
+    wordCloudLayout[cityIndex] = {
+      city,
+      colorIndex,
+      words: layoutResult.words || []
+    };
+    
+    console.log(`城市 ${city}: 成功放置 ${layoutResult.placedCount}/${poiData.length + 1} 个标签`);
+    
+    // 让浏览器有机会渲染
+    await waitNextFrame();
   }
   
-  savedWordCloudLayout = {
-    items: allWordCloud.map(item => {
-      let cityName = null;
-      if (item.isCity) {
-        cityName = item.city || item.text;
-      } else {
-        if (item.city) {
-          cityName = item.city;
-        } else {
-          cityName = poiToCityMap.get(item.text);
-        }
-      }
-      
-      return {
-        text: item.text,
-        x: item.x,
-        y: item.y,
-        size: item.size,
-        width: item.width,
-        height: item.height,
-        popularity: item.popularity,
-        isCity: item.isCity,
-        city: cityName
-      };
-    }),
-    sites: sites.map(s => ({ city: s.city, x: s.x, y: s.y })),
-    cityOrder: [...cityOrder],
-    colorIndicesMap: colorIndicesMap
-  };
+  // 保存布局信息到全局变量
+  savedWordCloudLayout = wordCloudLayout;
   
-  // 绘制词云
-  renderWordCloudFromLayout(ctx, savedWordCloudLayout, width, height);
-  
-  console.log(`词云绘制完成（d3-cloud-shape算法），共绘制 ${allWordCloud.length} 个标签`);
+  return wordCloudLayout;
 };
 
 /**
- * 快速更新背景颜色（仅更新颜色，不重新计算区域）
- * @param {CanvasRenderingContext2D} ctx - Canvas上下文
- * @param {number} width - 画布宽度
- * @param {number} height - 画布高度
- * @param {Array} cityOrder - 城市顺序
- * @param {boolean} forceRecalculateFromPalette - 是否强制从配色方案重新计算（用于配色方案变化时）
- * @returns {boolean} 是否成功更新
- */
-const fastUpdateBackgroundColors = (ctx, width, height, cityOrder, forceRecalculateFromPalette = false) => {
-  // 检查是否有保存的区域映射
-  if (!savedRegionPixelMap || !savedCanvasSize || !savedCityOrder || !savedColorIndices) {
-    console.warn('没有保存的区域映射或颜色索引，无法快速更新背景颜色');
-    return false;
-  }
-  
-  // 检查画布尺寸是否匹配
-  if (savedCanvasSize.width !== width || savedCanvasSize.height !== height) {
-    console.warn('画布尺寸不匹配，无法快速更新背景颜色');
-    return false;
-  }
-  
-  // 检查城市顺序是否匹配
-  if (savedCityOrder.length !== cityOrder.length || 
-      !savedCityOrder.every((city, index) => city === cityOrder[index])) {
-    console.warn('城市顺序不匹配，无法快速更新背景颜色');
-    return false;
-  }
-  
-  // 根据当前模式决定使用哪种颜色
-  const currentMode = poiStore.colorSettings.backgroundMode;
-  let colors;
-  
-  if (currentMode === 'multi') {
-    // 复色模式
-    // 如果强制重新计算（配色方案变化时），或者没有保存的复色颜色，从配色方案重新计算
-    if (forceRecalculateFromPalette || !savedMultiColorColors || savedMultiColorColors.length !== cityOrder.length) {
-      // 从当前的配色方案重新计算颜色（确保与文字颜色一致）
-      const opacity = poiStore.colorSettings.backgroundMultiColorOpacity ?? 0.1;
-      colors = cityOrder.map((city, cityIndex) => {
-        const colorIndex = savedColorIndices[cityIndex];
-        const bgColor = poiStore.Colors[colorIndex]; // 从新的配色方案获取颜色
-        
-        let r, g, b;
-        if (bgColor.startsWith('#')) {
-          const hex = bgColor.slice(1);
-          r = parseInt(hex.slice(0, 2), 16);
-          g = parseInt(hex.slice(2, 4), 16);
-          b = parseInt(hex.slice(4, 6), 16);
-        } else if (bgColor.startsWith('rgb')) {
-          const rgbMatch = bgColor.match(/\d+/g);
-          if (rgbMatch && rgbMatch.length >= 3) {
-            r = parseInt(rgbMatch[0]);
-            g = parseInt(rgbMatch[1]);
-            b = parseInt(rgbMatch[2]);
-          } else {
-            r = g = b = 200;
-          }
-        } else {
-          r = g = b = 200;
-        }
-        
-        return {
-          r,
-          g,
-          b,
-          a: Math.floor(255 * opacity)
-        };
-      });
-      if (forceRecalculateFromPalette) {
-        console.log('配色方案变化，从新的配色方案重新计算背景颜色（确保与文字颜色一致）');
-      } else {
-        console.warn('没有保存的复色颜色信息，从配色方案重新计算');
-      }
-    } else {
-      // 使用保存的复色颜色（仅用于透明度变化等情况，不用于配色方案变化）
-      const currentOpacity = poiStore.colorSettings.backgroundMultiColorOpacity ?? 0.1;
-      colors = savedMultiColorColors.map(c => {
-        // 保持RGB不变，只更新透明度
-        return {
-          r: c.r,
-          g: c.g,
-          b: c.b,
-          a: Math.floor(255 * currentOpacity)
-        };
-      });
-      console.log('使用保存的复色颜色信息（已根据当前透明度设置更新）');
-    }
-  } else {
-    // 单色模式：生成单色
-    const singleBgColor = poiStore.colorSettings.background || 'rgb(255, 255, 255)';
-    let r, g, b;
-    if (singleBgColor.startsWith('#')) {
-      const hex = singleBgColor.slice(1);
-      r = parseInt(hex.slice(0, 2), 16);
-      g = parseInt(hex.slice(2, 4), 16);
-      b = parseInt(hex.slice(4, 6), 16);
-    } else if (singleBgColor.startsWith('rgb')) {
-      const rgbMatch = singleBgColor.match(/\d+/g);
-      if (rgbMatch && rgbMatch.length >= 3) {
-        r = parseInt(rgbMatch[0]);
-        g = parseInt(rgbMatch[1]);
-        b = parseInt(rgbMatch[2]);
-      } else {
-        r = g = b = 255;
-      }
-    } else {
-      r = g = b = 255;
-    }
-    colors = cityOrder.map(() => ({ r, g, b, a: 255 }));
-  }
-  
-  // 创建新的ImageData
-  const imageData = new ImageData(width, height);
-  const pixelData = imageData.data;
-  
-  // 遍历所有像素，根据保存的区域映射快速更新颜色
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const pixelIndex = y * width + x;
-      const cityIndex = savedRegionPixelMap[pixelIndex];
-      
-      // 检查城市索引是否有效
-      if (cityIndex !== undefined && cityIndex < colors.length) {
-        const color = colors[cityIndex];
-        const dataIndex = pixelIndex * 4;
-        pixelData[dataIndex] = color.r;     // R
-        pixelData[dataIndex + 1] = color.g; // G
-        pixelData[dataIndex + 2] = color.b; // B
-        pixelData[dataIndex + 3] = color.a; // A
-      }
-    }
-  }
-  
-  // 绘制到canvas
-  ctx.putImageData(imageData, 0, 0);
-  
-  console.log('快速更新背景颜色完成');
-  return true;
-};
-
-/**
- * 基于已保存的布局信息快速重绘词云（用于字体、颜色等设置变化时）
- * @param {CanvasRenderingContext2D} ctx - Canvas上下文
- * @param {Object} layout - 保存的布局信息
+ * 基于缓存的布局信息重新绘制词云（只更新颜色和字体样式，不重新布局）
+ * @param {CanvasRenderingContext2D} ctx - canvas上下文
+ * @param {Object} layout - 缓存的布局信息 {cityIndex: {city, colorIndex, words: [...]}}
  * @param {number} width - 画布宽度
  * @param {number} height - 画布高度
  */
 const renderWordCloudFromLayout = (ctx, layout, width, height) => {
-  if (!layout || !layout.items || layout.items.length === 0) {
+  if (!layout || !ctx) {
+    console.warn('renderWordCloudFromLayout: 缺少布局信息或canvas上下文');
     return;
   }
   
   const fontSettings = poiStore.fontSettings;
   const fontFamily = fontSettings.fontFamily || 'Arial';
   const fontWeight = fontSettings.fontWeight || '700';
-  const textColorMode = poiStore.colorSettings.textColorMode || 'multi';
-  const textSingleColor = poiStore.colorSettings.textSingleColor || '#000000';
   
-  // 使用保存的颜色索引映射（必须使用图着色算法的颜色索引，确保与背景颜色一致）
-  let colorIndicesMap;
-  if (layout.colorIndicesMap && layout.colorIndicesMap instanceof Map) {
-    // 使用保存的颜色索引映射（来自图着色算法，确保与背景颜色一致）
-    colorIndicesMap = layout.colorIndicesMap;
-  } else {
-    // 如果没有保存的颜色索引映射，尝试使用 savedColorIndices（来自图着色算法）
-    if (savedColorIndices && savedColorIndices.length === layout.cityOrder.length) {
-      console.warn('布局中没有保存颜色索引映射，使用全局保存的颜色索引');
-      colorIndicesMap = new Map();
-      layout.cityOrder.forEach((city, cityIndex) => {
-        colorIndicesMap.set(city, savedColorIndices[cityIndex]);
-      });
-    } else {
-      // 最后的回退：使用循环分配（但这不是理想情况，应该避免）
-      console.error('错误：无法找到图着色算法的颜色索引，使用循环分配（可能导致颜色不一致）');
-      colorIndicesMap = new Map();
-      layout.cityOrder.forEach((city, cityIndex) => {
-        colorIndicesMap.set(city, cityIndex % poiStore.Colors.length);
-      });
+  // 获取文字配色设置
+  const textColorMode = poiStore.colorSettings.textColorMode || 'multi';
+  const textSingleColor = poiStore.colorSettings.textSingleColor || 'rgb(0, 0, 0)';
+  
+  // 遍历所有城市的布局信息
+  for (const cityIndex in layout) {
+    const cityLayout = layout[cityIndex];
+    const { colorIndex, words } = cityLayout;
+    
+    // 获取该城市的颜色（用于复色模式）
+    const multiTextColor = poiStore.Colors[colorIndex % poiStore.Colors.length];
+    
+    // 绘制每个已放置的标签
+    for (const word of words) {
+      ctx.save();
+      
+      // 设置字体（使用当前字体设置）
+      const fontStr = `${fontWeight} ${Math.round(word.size)}px ${fontFamily}`;
+      ctx.font = fontStr;
+      
+      // 设置颜色：城市名保持红色，POI根据文字配色模式设置
+      if (word.isCity) {
+        ctx.fillStyle = '#ff0000'; // 城市名：红色
+      } else {
+        // POI文字：根据文字配色模式设置颜色
+        if (textColorMode === 'single') {
+          ctx.fillStyle = textSingleColor; // 单色模式：使用统一颜色
+        } else {
+          ctx.fillStyle = multiTextColor; // 复色模式：使用配色窗口的颜色（与背景色同色系）
+        }
+      }
+      
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(word.text, word.x, word.y);
+      ctx.restore();
     }
   }
-  
-  layout.items.forEach(item => {
-    // 城市名默认用红色字体
-    let textColor = '#000000';
-    let displayText = item.text;
-    
-    // 如果是城市名，根据当前的语言和序号设置重新生成显示文本
-    if (item.isCity && item.city) {
-      const language = fontSettings.language || 'zh';
-      const showCityIndex = fontSettings.showCityIndex || false;
-      
-      // 根据语言转换为拼音
-      if (language === 'en') {
-        displayText = cityNameToPinyin(item.city);
-      } else {
-        displayText = item.city;
-      }
-      
-      // 如果需要显示序号，添加序号前缀
-      if (showCityIndex && layout.cityOrder && layout.cityOrder.length > 0) {
-        const cityIndex = layout.cityOrder.indexOf(item.city);
-        if (cityIndex >= 0) {
-          displayText = `${cityIndex + 1}. ${displayText}`;
-        }
-      }
-    }
-    
-    if (item.isCity) {
-      // 城市名使用红色
-      textColor = '#ff0000';
-    } else {
-      // 其他文字按照文字配色设置
-      const cityName = item.city;
-      if (cityName) {
-        const colorIndex = colorIndicesMap.get(cityName) ?? 0;
-        const bgColor = poiStore.Colors[colorIndex];
-        
-        if (textColorMode === 'single') {
-          textColor = textSingleColor;
-        } else {
-          // 复色模式：使用对应城市的背景色
-          textColor = bgColor;
-        }
-      }
-    }
-    
-    ctx.save();
-    ctx.font = `${fontWeight} ${item.size}px ${fontFamily}`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = textColor;
-    
-    // 如果是城市名，添加描边效果
-    if (item.isCity) {
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
-      ctx.lineWidth = 2;
-      ctx.strokeText(displayText, item.x, item.y);
-    }
-    
-    ctx.fillText(displayText, item.x, item.y);
-    ctx.restore();
-  });
 };
 
 /**
- * 仅基于已有的加权Voronoi结果重新生成词云
- * 不重新计算Voronoi背景，提升字体调整时的性能
+ * 仅重新生成词云布局（不重新计算加权维诺图）
+ * 用于语言切换、序号显示、字号区间、英文字体变化等情况
  */
 const relayoutWordCloudOnly = async () => {
-  if (
-    !poiStore.hasDrawing ||
-    !savedSites ||
-    !savedSites.length ||
-    !savedRegionPixelMap ||
-    !savedCanvasSize ||
-    !savedCityOrder ||
-    !savedColorIndices ||
-    !wordCloudCanvasRef.value
-  ) {
-    console.warn('[TagCloudCanvas] 缺少已保存的背景/布局信息，无法仅重新布局词云，回退到完整重绘');
-    await handleRenderCloud();
+  if (!savedRegionPixelMap || !savedCityOrder || !wordCloudCtx || !wordCloudCanvas) {
+    console.warn('relayoutWordCloudOnly: 缺少必要的缓存数据');
     return;
   }
-
-  const canvas = wordCloudCanvasRef.value;
-  const width = canvas.width;
-  const height = canvas.height;
-
-  // 如果画布尺寸与保存的尺寸不一致，说明布局环境已变，直接完整重绘
-  if (width !== savedCanvasSize.width || height !== savedCanvasSize.height) {
-    console.warn('[TagCloudCanvas] 画布尺寸与保存的Voronoi结果不一致，回退到完整重绘');
-    await handleRenderCloud();
-    return;
-  }
-
-  // 确保上下文可用
-  if (!wordCloudCtx) {
-    wordCloudCtx = canvas.getContext('2d');
-  }
-
-  // 确保碰撞检测 canvas 存在且尺寸一致
-  if (!collisionCanvas || collisionCanvas.width !== width || collisionCanvas.height !== height) {
-    collisionCanvas = document.createElement('canvas');
-    collisionCanvas.width = width;
-    collisionCanvas.height = height;
-    collisionCtx = collisionCanvas.getContext('2d');
-    collisionCanvas.style.display = 'none';
-  }
-
-  // 基于保存的站点信息构造 sites，用于词云布局
-  const sites = savedSites.map(s => ({
-    city: s.city,
-    x: s.x,
-    y: s.y,
-    weight: s.weight || 0.00001,
-  }));
-
-  // 重绘前开启遮罩并初始化提示
-  loadingStage.value = '正在重新布局标签云…';
-  loadingCurrentCity.value = '';
+  
+  const width = wordCloudCanvas.width;
+  const height = wordCloudCanvas.height;
+  const cityOrder = savedCityOrder;
+  const data = poiStore.compiledData;
+  
+  // 设置词云模式
+  loadingMode.value = 'wordcloud';
+  loadingTotalCities.value = cityOrder.length;
   loadingCurrentIndex.value = 0;
-  loadingTotalCities.value = sites.length;
+  loadingStage.value = '正在重新布局词云...';
+  
+  // 设置loading状态
   poiStore.setCloudLoading(true);
-  await nextTick(); // 让遮罩渲染
-  await waitNextFrame();
-
-  try {
-    // 清空之前的词云画布和布局缓存
-    wordCloudCtx.clearRect(0, 0, width, height);
-    savedWordCloudLayout = null;
-    fontMetricsCache.clear();
-
-    // 重新根据当前字体设置生成词云
-    // 优先使用 d3-cloud-shape 算法，如果失败则回退到原有算法
-    try {
-      console.log('尝试使用 d3-cloud-shape 算法重新布局词云...');
-      await drawWordCloudInRegionsWithShape(
-        wordCloudCtx,
-        collisionCtx,
-        sites,
-        poiStore.cityOrder,
-        poiStore.compiledData,
-        width,
-        height,
-        savedColorIndices
-      );
-      console.log('d3-cloud-shape 算法重新布局完成');
-    } catch (error) {
-      console.warn('d3-cloud-shape 算法重新布局失败，回退到原有算法:', error);
-      await drawWordCloudInRegions(
-        wordCloudCtx,
-        collisionCtx,
-        sites,
-        poiStore.cityOrder,
-        poiStore.compiledData,
-        width,
-        height,
-        savedColorIndices
-      );
-    }
-  } finally {
-    poiStore.setCloudLoading(false);
-    loadingStage.value = '';
-    loadingCurrentCity.value = '';
-    loadingCurrentIndex.value = 0;
-    loadingTotalCities.value = 0;
-  }
-
-  console.log('[TagCloudCanvas] 仅重新布局词云完成（未重新计算加权Voronoi）');
-};
-
-// 绘制加权Voronoi图到Canvas（带迭代优化）
-const drawWeightedVoronoi = async (voronoiCanvas, voronoiCtx, wordCloudCanvas, wordCloudCtx, data, cityOrder, width, height) => {
-  // 清空两个画布
-  voronoiCtx.clearRect(0, 0, width, height);
-  wordCloudCtx.clearRect(0, 0, width, height);
-  
-  // 设置维诺图画布背景色
-  loadingStage.value = '正在初始化画布与背景…';
-  let bgColor;
-  if (poiStore.colorSettings.backgroundMode === 'single') {
-    bgColor = poiStore.colorSettings.background;
-  } else {
-    // 复色模式：使用复色方案中的第一个颜色作为背景色
-    const palette = poiStore.colorSettings.palette || [];
-    if (palette.length > 0) {
-      bgColor = palette[0];
-    } else {
-      bgColor = 'rgb(255, 255, 255)'; // 默认白色
-    }
-  }
-  voronoiCtx.fillStyle = bgColor;
-  voronoiCtx.fillRect(0, 0, width, height);
-  
-  // 词云canvas设置为透明背景
-  wordCloudCtx.clearRect(0, 0, width, height);
-
-  // 加载城市坐标
-  loadingStage.value = '正在加载城市坐标…';
-  const cities = await loadCityCoordinates();
-  if (!cities || !cities.cities) {
-    console.error('无法加载城市坐标数据');
-    return;
-  }
-
-  // 计算城市权重
-  loadingStage.value = '正在计算城市权重…';
-  const cityWeights = calculateCityWeights(data, cityOrder);
-  
-  // 将经纬度坐标映射到画布空间（初始站点）
-  loadingStage.value = '正在映射城市到画布坐标…';
-  const initialSites = mapCoordinatesToCanvas(cities, cityOrder, width, height);
-  
-  if (initialSites.length === 0) {
-    console.warn('没有有效的城市站点');
-    return;
-  }
-
-  // 合并权重信息到站点
-  let sitesWithWeights = initialSites.map(site => {
-    const weightInfo = cityWeights.find(w => w.city === site.city);
-    return {
-      ...site,
-      weight: weightInfo ? weightInfo.weight : 0.00001
-    };
-  });
-
-  const totalPixels = width * height;
-  const maxIterations = 25; // 增加最大迭代次数
-  const targetErrorRate = 0.12; // 12%（稍微放宽，因为最终会有权重调整优化）
-  
-  // 计算迭代分辨率（低分辨率用于迭代）
-  const iterationResolution = calculateIterationResolution(width, height);
-  console.log(`迭代分辨率: ${iterationResolution}像素步长`);
-  
-  // 存储每次迭代的结果（只存储统计信息，不存储ImageData）
-  const iterationResults = [];
-  
-  console.log('开始迭代优化加权Voronoi图...');
-  console.log(`目标：平均面积误差率 < ${(targetErrorRate * 100).toFixed(1)}%，最多迭代 ${maxIterations} 次`);
-
-  // 迭代优化循环（使用低分辨率，不生成ImageData）
-  for (let iteration = 0; iteration < maxIterations; iteration++) {
-    loadingStage.value = '正在生成加权Voronoi图…';
-    loadingCurrentCity.value = '';
-    loadingCurrentIndex.value = 0;
-    loadingTotalCities.value = 0;
-    // 每轮迭代开始前让浏览器渲染一帧，刷新遮罩内容
-    await nextTick();
-    await waitNextFrame();
-    console.log(`\n=== 迭代 ${iteration + 1}/${maxIterations} ===`);
-    
-    // 生成Voronoi图（低分辨率，不生成ImageData）
-    const { cityCenters, cityPixelCounts, sites } = generateSingleVoronoi(
-      sitesWithWeights, 
-      cityOrder, 
-      width, 
-      height,
-      iterationResolution,  // 使用低分辨率
-      false,                 // 不生成ImageData
-      null                   // 不需要颜色
-    );
-    
-    // 计算面积误差率（需要根据分辨率调整总像素数）
-    const sampledPixels = Math.ceil(width / iterationResolution) * Math.ceil(height / iterationResolution);
-    const pixelBlockSize = iterationResolution * iterationResolution;
-    const adjustedTotalPixels = sampledPixels * pixelBlockSize;
-    
-    const { averageErrorRate, errorRates } = calculateAreaErrorRate(
-      cityPixelCounts, 
-      cityWeights, 
-      adjustedTotalPixels
-    );
-    
-    // 记录本次迭代结果（只存储统计信息）
-    const iterationResult = {
-      iteration: iteration + 1,
-      sites: sites.map(s => ({ city: s.city, x: s.x, y: s.y, weight: s.weight })),
-      cityCenters: new Map(cityCenters), // 保存形心数据
-      averageErrorRate,
-      errorRates: errorRates.map(e => ({
-        city: e.city,
-        targetArea: Math.round(e.targetArea),
-        actualArea: e.actualArea,
-        errorRate: (e.errorRate * 100).toFixed(2) + '%'
-      }))
-    };
-    
-    iterationResults.push(iterationResult);
-    
-    console.log(`平均面积误差率: ${(averageErrorRate * 100).toFixed(2)}%`);
-    console.log('各城市面积误差率:');
-    errorRates.forEach(e => {
-      console.log(`  ${e.city}: 目标=${Math.round(e.targetArea)}, 实际=${e.actualArea}, 误差率=${(e.errorRate * 100).toFixed(2)}%`);
-    });
-    
-    // 检查是否达到目标
-    if (averageErrorRate < targetErrorRate) {
-      console.log(`\n✓ 达到目标！平均面积误差率 ${(averageErrorRate * 100).toFixed(2)}% < ${(targetErrorRate * 100).toFixed(1)}%`);
-      break;
-    }
-    
-    // 计算形心并更新站点位置（为下一次迭代准备）
-    if (iteration < maxIterations - 1) {
-      // 1. 强制小城市权重增强，避免极小空间（参数可调整）
-      sitesWithWeights = enforceMinAreaWeights(cityPixelCounts, sitesWithWeights, REGION_MIN_PIXELS);
-      // 2. 按顺序保持与形心收敛
-      sitesWithWeights = updateSitesWithOrderCentroids(cityCenters, sitesWithWeights, cityOrder);
-      // 3. 对site应用"视觉感知中心"收敛调整
-      if (typeof regionMasks !== 'undefined' && Array.isArray(regionMasks) && regionMasks.length === sitesWithWeights.length) {
-        sitesWithWeights.forEach((site,i)=>{
-          const maskObj=regionMasks[i];if(maskObj?.mask){
-            const center = trueCentroidOfRegion(maskObj.mask);
-            if(center){site.x=center[0];site.y=center[1];}
-          }
-        });
-      }
-      // 4. 断块连通性修正
-      if (typeof regionMasks !== 'undefined' && Array.isArray(regionMasks) && regionMasks.length === sitesWithWeights.length) {
-        const theta = typeof window !== 'undefined' && window.__RESCUE_THETA !== undefined ? window.__RESCUE_THETA : 1.0;
-        sitesWithWeights = rescueDisconnectedSites(sitesWithWeights, regionMasks, width, height, {theta});
-        console.log('已修正断块不连通站点。theta=', theta);
-      }
-      console.log('已更新站点位置为形心/顺序/连接性/中心感知混合，准备下一次迭代...');
-    }
-  }
-
-  // 选择平均面积误差率最低的方案
-  const bestResult = iterationResults.reduce((best, current) => {
-    return current.averageErrorRate < best.averageErrorRate ? current : best;
-  }, iterationResults[0]);
-
-  console.log(`\n=== 最终结果 ===`);
-  console.log(`选择迭代 ${bestResult.iteration} 的结果（平均面积误差率最低: ${(bestResult.averageErrorRate * 100).toFixed(2)}%）`);
-  console.log('最终站点坐标:');
-  bestResult.sites.forEach(s => {
-    console.log(`  ${s.city}: (${s.x.toFixed(2)}, ${s.y.toFixed(2)})`);
-  });
-
-  // 使用最佳站点位置生成最终全分辨率Voronoi图
-  console.log('生成最终全分辨率图像...');
-  // 构建最终站点数组，使用最佳迭代的站点位置
-  let finalSites = bestResult.sites.map(s => {
-    // 从原始站点数组中获取完整信息，但使用最佳迭代的坐标
-    const originalSite = sitesWithWeights.find(orig => orig.city === s.city);
-    if (originalSite) {
-      return {
-        ...originalSite,
-        x: s.x,
-        y: s.y
-      };
-    }
-    // 如果找不到原始站点，使用保存的站点信息
-    return s;
-  });
-  
-  // 在最终生成前，先计算一次面积误差率，对面积不足的小城市进行权重调整
-  console.log('计算最终面积误差率并进行权重优化...');
-  // 使用适中的分辨率进行快速检查（平衡准确性和性能）
-  const checkResolution = width * height > 500000 ? 3 : 2;
-  const { cityCenters: finalCheckCenters, cityPixelCounts: finalCheckPixelCounts } = generateSingleVoronoi(
-    finalSites,
-    cityOrder,
-    width,
-    height,
-    checkResolution,        // 使用适中分辨率快速检查
-    false,                  // 不生成ImageData
-    null                    // 不需要颜色
-  );
-  
-  // 计算面积误差率（需要考虑分辨率的影响）
-  const sampledPixels = Math.ceil(width / checkResolution) * Math.ceil(height / checkResolution);
-  const pixelBlockSize = checkResolution * checkResolution;
-  const adjustedTotalPixels = sampledPixels * pixelBlockSize;
-  const { errorRates: finalErrorRates } = calculateAreaErrorRate(
-    finalCheckPixelCounts,
-    cityWeights,
-    adjustedTotalPixels
-  );
-  
-  // 分析误差率，对面积不足的小城市增加权重（支持多次迭代调整）
-  const adjustmentThreshold = 0.10; // 误差率超过10%的城市需要调整（降低阈值）
-  const minAreaRatio = 0.85; // 实际面积小于目标面积85%的城市需要重点调整（提高标准）
-  const maxWeightMultiplier = 5.0; // 最大权重调整倍数（从2.0提高到5.0）
-  const maxAdjustmentIterations = 3; // 最多进行3次权重调整迭代
-  
-  let currentSites = finalSites;
-  let iterationCount = 0;
-  
-  while (iterationCount < maxAdjustmentIterations) {
-    // 计算当前面积误差率
-    const { cityPixelCounts: currentPixelCounts } = generateSingleVoronoi(
-      currentSites,
-      cityOrder,
-      width,
-      height,
-      checkResolution,
-      false,
-      null
-    );
-    
-    const { errorRates: currentErrorRates } = calculateAreaErrorRate(
-      currentPixelCounts,
-      cityWeights,
-      adjustedTotalPixels
-    );
-    
-    // 分析需要调整的城市
-    const weightAdjustments = new Map();
-    
-    currentErrorRates.forEach(errorInfo => {
-      const { city, targetArea, actualArea, errorRate } = errorInfo;
-      const areaRatio = targetArea > 0 ? actualArea / targetArea : 0;
-      
-      // 对于面积不足的小城市，增加权重
-      if (actualArea < targetArea && (errorRate > adjustmentThreshold || areaRatio < minAreaRatio)) {
-        // 计算权重调整倍数
-        let weightMultiplier;
-        
-        if (areaRatio < 0.3) {
-          // 对于面积比<30%的严重不足城市，使用更激进的调整（平方根策略）
-          // 如果面积比是20%，需要5倍权重，但使用平方根策略：sqrt(1/0.2) ≈ 2.24，再乘以2
-          weightMultiplier = Math.min(Math.sqrt(1.0 / areaRatio) * 1.5, maxWeightMultiplier);
-        } else if (areaRatio < 0.5) {
-          // 对于面积比30-50%的城市，使用中等激进策略
-          weightMultiplier = Math.min(1.0 / areaRatio * 1.2, maxWeightMultiplier);
-        } else {
-          // 对于面积比50-85%的城市，使用标准调整
-          weightMultiplier = Math.min(1.0 / areaRatio, maxWeightMultiplier);
-        }
-        
-        // 如果是多次迭代，使用渐进式调整（避免过度调整）
-        if (iterationCount > 0) {
-          weightMultiplier = 1.0 + (weightMultiplier - 1.0) * 0.6; // 每次只调整60%的差距
-        }
-        
-        weightAdjustments.set(city, weightMultiplier);
-        
-        console.log(`[迭代${iterationCount + 1}] 城市 ${city}: 目标面积=${Math.round(targetArea)}, 实际面积=${Math.round(actualArea)}, 面积比=${(areaRatio * 100).toFixed(1)}%, 误差率=${(errorRate * 100).toFixed(2)}%, 权重调整倍数=${weightMultiplier.toFixed(2)}`);
-      }
-    });
-    
-    // 如果没有需要调整的城市，退出循环
-    if (weightAdjustments.size === 0) {
-      console.log(`权重调整完成，共进行 ${iterationCount} 次迭代`);
-      break;
-    }
-    
-    // 更新站点权重
-    console.log(`[迭代${iterationCount + 1}] 对 ${weightAdjustments.size} 个城市进行权重调整...`);
-    currentSites = currentSites.map(site => {
-      const adjustment = weightAdjustments.get(site.city);
-      if (adjustment && adjustment > 1.0) {
-        return {
-          ...site,
-          weight: site.weight * adjustment
-        };
-      }
-      return site;
-    });
-    
-    iterationCount++;
-    
-    // 验证调整效果
-    const { cityPixelCounts: adjustedPixelCounts } = generateSingleVoronoi(
-      currentSites,
-      cityOrder,
-      width,
-      height,
-      checkResolution,
-      false,
-      null
-    );
-    
-    const { averageErrorRate: adjustedErrorRate, errorRates: adjustedErrorRates } = calculateAreaErrorRate(
-      adjustedPixelCounts,
-      cityWeights,
-      adjustedTotalPixels
-    );
-    
-    console.log(`[迭代${iterationCount}] 权重调整后平均误差率: ${(adjustedErrorRate * 100).toFixed(2)}%`);
-    adjustedErrorRates.forEach(e => {
-      const areaRatio = e.targetArea > 0 ? e.actualArea / e.targetArea : 0;
-      if (weightAdjustments.has(e.city)) {
-        console.log(`  ${e.city}: 调整后面积=${Math.round(e.actualArea)}, 面积比=${(areaRatio * 100).toFixed(1)}%`);
-      }
-    });
-    
-    // 如果平均误差率已经很低（<8%），可以提前退出
-    if (adjustedErrorRate < 0.08) {
-      console.log(`平均误差率已降至 ${(adjustedErrorRate * 100).toFixed(2)}%，提前结束权重调整`);
-      break;
-    }
-  }
-  
-  // 使用最终调整后的站点
-  finalSites = currentSites;
-  
-  // 使用最终站点位置和图着色算法预计算颜色（确保相邻区域不同颜色）
-  console.log('使用图着色算法分配颜色...');
-  
-  // 重要：无论当前是单色还是复色模式，都要计算复色模式下的颜色（用于保存，以便快速切换）
-  const { colors: multiColorColors, colorIndices } = precomputeCityColors(cityOrder, finalSites, width, height, true);
-  
-  // 根据当前模式决定使用哪种颜色
-  const currentMode = poiStore.colorSettings.backgroundMode;
-  let precomputedColors;
-  if (currentMode === 'single') {
-    // 单色模式：生成单色的颜色（所有区域都是背景色）
-    const singleBgColor = poiStore.colorSettings.background || 'rgb(255, 255, 255)';
-    let r, g, b;
-    if (singleBgColor.startsWith('#')) {
-      const hex = singleBgColor.slice(1);
-      r = parseInt(hex.slice(0, 2), 16);
-      g = parseInt(hex.slice(2, 4), 16);
-      b = parseInt(hex.slice(4, 6), 16);
-    } else if (singleBgColor.startsWith('rgb')) {
-      const rgbMatch = singleBgColor.match(/\d+/g);
-      if (rgbMatch && rgbMatch.length >= 3) {
-        r = parseInt(rgbMatch[0]);
-        g = parseInt(rgbMatch[1]);
-        b = parseInt(rgbMatch[2]);
-      } else {
-        r = g = b = 255;
-      }
-    } else {
-      r = g = b = 255;
-    }
-    // 生成单色模式的颜色数组（所有区域都是相同的单色，完全不透明）
-    precomputedColors = cityOrder.map(() => ({ r, g, b, a: 255 }));
-    console.log('当前为单色模式，使用单色渲染，但已保存复色模式颜色信息');
-  } else {
-    // 复色模式：直接使用复色模式的颜色
-    precomputedColors = multiColorColors;
-    console.log('当前为复色模式，使用复色渲染');
-  }
-  
-  // 创建颜色索引映射（用于文字颜色）
-  const colorIndicesMap = new Map();
-  cityOrder.forEach((city, cityIndex) => {
-    colorIndicesMap.set(city, colorIndices[cityIndex]);
-  });
-  
-  const { imageData: finalImageData, cityCenters: finalRenderCenters, regionPixelMap: finalRegionPixelMap } = generateSingleVoronoi(
-    finalSites,
-    cityOrder,
-    width,
-    height,
-    1,                      // 全分辨率（1像素）
-    true,                   // 生成ImageData
-    precomputedColors,      // 使用当前模式的颜色（单色或复色）
-    true                    // 保存区域像素映射（用于快速更新颜色）
-  );
-
-  // 保存区域像素映射和相关信息（用于快速更新背景颜色）
-  savedRegionPixelMap = finalRegionPixelMap;
-  savedCanvasSize = { width, height };
-  savedCityOrder = [...cityOrder];
-  savedColorIndices = [...colorIndices]; // 保存颜色索引映射（图着色结果）
-  
-  // 重要：保存复色模式下的颜色信息（无论当前模式是什么），用于快速切换到复色模式
-  // 注意：这里保存的是复色模式下的颜色（带透明度），不是单色模式的颜色
-  savedMultiColorColors = multiColorColors.map(c => ({ ...c })); // 深拷贝，避免引用问题
-
-  // 绘制最终结果的Voronoi图到维诺图canvas
-  voronoiCtx.putImageData(finalImageData, 0, 0);
-
-  // 使用最终渲染时计算的形心（更准确）
-  const finalCityCentersForText = finalRenderCenters;
-
-  // 注意：城市名称现在由词云布局函数绘制，这里不再单独绘制
-  // 这样可以确保城市名称作为词云的一部分，大小和位置更合理
-
-  // 绘制城市站点（可选，用于调试，默认不绘制）
-  // bestResult.sites.forEach(site => {
-  //   ctx.beginPath();
-  //   ctx.arc(site.x, site.y, 4, 0, Math.PI * 2);
-  //   ctx.fillStyle = '#ff0000';
-  //   ctx.fill();
-  //   ctx.strokeStyle = '#ffffff';
-  //   ctx.lineWidth = 2;
-  //   ctx.stroke();
-  // });
-
-  console.log('加权Voronoi图绘制完成（迭代优化）');
-  
-  // 保存区域映射用于词云布局
-  currentRegionMap = new Map();
-  cityOrder.forEach((city, cityIndex) => {
-    const regionPixels = new Set();
-    currentRegionMap.set(city, regionPixels);
-  });
-  
-  // 生成区域映射（用于快速判断点是否在区域内）
-  const regionMapResolution = 2; // 使用较低分辨率以提高性能
-  for (let y = 0; y < height; y += regionMapResolution) {
-    for (let x = 0; x < width; x += regionMapResolution) {
-      let minDist = Infinity;
-      let closestCity = null;
-      
-      for (const site of finalSites) {
-        const dx = x - site.x;
-        const dy = y - site.y;
-        const euclideanDist = Math.sqrt(dx * dx + dy * dy);
-        
-        if (euclideanDist === 0) {
-          closestCity = site.city;
-          break;
-        }
-        
-        const weight = Math.max(site.weight || 0.00001, 0.00001);
-        const weightedDist = euclideanDist / Math.sqrt(weight);
-        
-        if (weightedDist < minDist) {
-          minDist = weightedDist;
-          closestCity = site.city;
-        }
-      }
-      
-      if (closestCity && currentRegionMap.has(closestCity)) {
-        // 存储像素块（考虑分辨率）
-        for (let dy = 0; dy < regionMapResolution && (y + dy) < height; dy++) {
-          for (let dx = 0; dx < regionMapResolution && (x + dx) < width; dx++) {
-            const px = x + dx;
-            const py = y + dy;
-            currentRegionMap.get(closestCity).add(`${px},${py}`);
-          }
-        }
-      }
-    }
-
-    // 每处理一部分行，适当让出主线程，确保遮罩有机会更新
-    if (y % (regionMapResolution * 40) === 0) {
-      await nextTick();
-      await waitNextFrame();
-    }
-  }
-  
-  console.log('区域映射生成完成，开始绘制词云...');
-  
-  // 保存站点信息（用于绘制线条）
-  savedSites = finalSites.map(s => ({ city: s.city, x: s.x, y: s.y, weight: s.weight }));
-  
-  // 绘制词云到词云canvas（传入碰撞检测canvas的上下文）
-  // 优先使用 d3-cloud-shape 算法，如果失败则回退到原有算法
-  // 传递颜色索引，确保文字颜色与背景颜色一致
-  try {
-    console.log('尝试使用 d3-cloud-shape 算法绘制词云...');
-    await drawWordCloudInRegionsWithShape(
-      wordCloudCtx,
-      collisionCtx,
-      finalSites,
-      cityOrder,
-      data,
-      width,
-      height,
-      colorIndices
-    );
-    console.log('d3-cloud-shape 算法绘制完成');
-  } catch (error) {
-    console.warn('d3-cloud-shape 算法绘制失败，回退到原有算法:', error);
-    await drawWordCloudInRegions(
-      wordCloudCtx,
-      collisionCtx,
-      finalSites,
-      cityOrder,
-      data,
-      width,
-      height,
-      colorIndices
-    );
-  }
-  
-  // 词云完成后再绘制线条
-  drawCityLines();
-};
-
-const handleRenderCloud = async () => {
-  if (!poiStore.hasDrawing) {
-    startDrawGuideIntro();
-    return;
-  }
-
-  // 初始化遮罩提示状态
-  loadingStage.value = '正在准备数据，请稍候…';
-  loadingCurrentCity.value = '';
-  loadingCurrentIndex.value = 0;
-  loadingTotalCities.value = poiStore.cityOrder.length || 0;
-
-  poiStore.setCloudLoading(true);
-  // 确保 DOM 更新，让 loading overlay 显示
   await nextTick();
-  // 使用 requestAnimationFrame 确保浏览器至少渲染一次 loading overlay
-  await new Promise(resolve => requestAnimationFrame(resolve));
-  // 再等待一帧，确保 loading overlay 完全渲染
-  await new Promise(resolve => requestAnimationFrame(resolve));
   
-  const startTime = Date.now();
-  const minDisplayTime = 300; // 最小显示时间 300ms，确保用户能看到 loading
+  // 清空词云canvas
+  wordCloudCtx.clearRect(0, 0, width, height);
   
+  // 重新生成词云布局（使用当前的字体设置）
+  await drawWordCloudsInRegions(
+    wordCloudCtx,
+    savedRegionPixelMap,
+    cityOrder,
+    data,
+    width,
+    height,
+    savedColorIndices
+  );
+  
+  // 关闭loading
+  poiStore.setCloudLoading(false);
+  loadingStage.value = '';
+  loadingCurrentCity.value = '';
+  loadingCurrentIndex.value = 0;
+  loadingTotalCities.value = 0;
+  
+  // console.log('词云布局已重新生成（不重新计算加权维诺图）');
+};
+
+/**
+ * 主渲染函数：生成加权维诺图
+ */
+const handleRenderCloud = async () => {
   try {
     console.info('[TagCloudCanvas] handleRenderCloud 开始', {
       hasDrawing: poiStore.hasDrawing,
       cityOrderCount: poiStore.cityOrder.length,
       compiledKeys: Object.keys(poiStore.compiledData || {}).length,
     });
+    
     // 检查数据是否已准备好
-    if (!poiStore.cityOrder.length || !Object.keys(poiStore.compiledData).length) {
+    if (!poiStore.hasDrawing || !poiStore.cityOrder.length || !Object.keys(poiStore.compiledData || {}).length) {
       console.warn('数据未准备好，请等待数据处理完成', {
+        hasDrawing: poiStore.hasDrawing,
         cityOrder: poiStore.cityOrder,
         compiledDataKeys: Object.keys(poiStore.compiledData || {}),
       });
       return;
     }
+    
+    // 设置loading状态
+    poiStore.setCloudLoading(true);
+    // 设置初始模式为加权维诺图模式
+    loadingMode.value = 'voronoi';
+    loadingStage.value = '正在准备数据...';
+    loadingTotalCities.value = poiStore.cityOrder.length;
+    loadingCurrentIndex.value = 0;
+    
     await nextTick();
-    if (!voronoiCanvasRef.value || !wordCloudCanvasRef.value || !wrapperRef.value) return;
+    
+    // 检查canvas是否已初始化
+    if (!voronoiCanvas || !voronoiCtx || !wrapperRef.value) {
+      console.error('Canvas未初始化');
+      poiStore.setCloudLoading(false);
+      return;
+    }
+    
+    // 获取画布尺寸
     const rect = wrapperRef.value.getBoundingClientRect();
     const width = Math.floor(rect.width);
     const height = Math.floor(rect.height);
     
-    // 设置两个Canvas尺寸
-    voronoiCanvas = voronoiCanvasRef.value;
+    // 更新canvas尺寸
     voronoiCanvas.width = width;
     voronoiCanvas.height = height;
-    voronoiCtx = voronoiCanvas.getContext('2d');
     
-    wordCloudCanvas = wordCloudCanvasRef.value;
-    wordCloudCanvas.width = width;
-    wordCloudCanvas.height = height;
-    wordCloudCtx = wordCloudCanvas.getContext('2d');
-    
-    // 初始化线条canvas
-    if (lineCanvasRef.value) {
-      lineCanvas = lineCanvasRef.value;
+    // 清空canvas
+    voronoiCtx.clearRect(0, 0, width, height);
+    if (wordCloudCtx && wordCloudCanvas) {
+      wordCloudCanvas.width = width;
+      wordCloudCanvas.height = height;
+      wordCloudCtx.clearRect(0, 0, width, height);
+    }
+    if (lineCtx && lineCanvas) {
       lineCanvas.width = width;
       lineCanvas.height = height;
-      lineCtx = lineCanvas.getContext('2d');
+      lineCtx.clearRect(0, 0, width, height);
     }
-    
-    // 清空保存的布局信息
-    currentVoronoiRegions = null;
-    currentCityOrder = null;
-    savedWordCloudLayout = null; // 清空保存的布局
-    savedRegionPixelMap = null; // 清空保存的区域像素映射
-    savedCanvasSize = null; // 清空保存的画布尺寸
-    savedCityOrder = null; // 清空保存的城市顺序
-    savedColorIndices = null; // 清空保存的颜色索引映射
-    savedMultiColorColors = null; // 清空保存的复色模式颜色信息
     
     const data = poiStore.compiledData;
     const cityOrder = poiStore.cityOrder;
     
-    await nextTick();
-    // 再次让浏览器渲染一次，确保 loading overlay 可见
-    await new Promise(resolve => setTimeout(resolve, 50));
+    // 1. 计算城市权重（使用POI数量）
+    loadingStage.value = '正在计算城市权重...';
+    await waitNextFrame();
+    const cityWeights = calculateCityWeights(data, cityOrder);
+    console.log('城市权重:', cityWeights);
     
-    // 创建隐藏的碰撞检测canvas
-    collisionCanvas = document.createElement('canvas');
-    collisionCanvas.width = width;
-    collisionCanvas.height = height;
-    collisionCtx = collisionCanvas.getContext('2d');
-    collisionCanvas.style.display = 'none'; // 隐藏canvas
+    // 2. 加载城市坐标数据
+    loadingStage.value = '正在加载城市坐标...';
+    await waitNextFrame();
+    const cities = await loadCityCoordinates();
+    if (!cities) {
+      console.error('无法加载城市坐标数据');
+      poiStore.setCloudLoading(false);
+      return;
+    }
     
-    // 绘制加权Voronoi图和词云
-    await drawWeightedVoronoi(voronoiCanvas, voronoiCtx, wordCloudCanvas, wordCloudCtx, data, cityOrder, width, height);
+    // 3. 映射城市中心点到画布空间
+    loadingStage.value = '正在映射城市坐标...';
+    await waitNextFrame();
+    const sites = mapCoordinatesToCanvas(cities, cityOrder, width, height);
+    if (sites.length === 0) {
+      console.error('无法映射城市坐标');
+      poiStore.setCloudLoading(false);
+      return;
+    }
     
-    // 记录词云生成（包括重绘）
+    // 4. 合并站点和权重
+    const sitesWithWeights = sites.map(site => {
+      const weightInfo = cityWeights.find(w => w.city === site.city);
+      return {
+        ...site,
+        weight: weightInfo ? weightInfo.weight : 0.00001
+      };
+    });
+    
+    // 保存站点信息（用于绘制线条）
+    savedSites = sitesWithWeights;
+    
+    // 5. 创建临时颜色数组（用于迭代优化过程中的区域映射计算，颜色不重要）
+    const tempColors = cityOrder.map(() => ({ r: 200, g: 200, b: 200, a: 255 }));
+    
+    // 6. 迭代优化算法（方案4）- 跑满20次迭代，找出最优方案
+    const maxIterations = 20;
+    let currentSites = sitesWithWeights.map(s => ({ ...s })); // 深拷贝
+    let bestErrorRate = Infinity;
+    let bestSites = sitesWithWeights.map(s => ({ ...s })); // 深拷贝
+    let bestRegionPixelMap = null;
+    
+    // 设置加权维诺图模式
+    loadingMode.value = 'voronoi';
+    loadingTotalIterations.value = maxIterations;
+    loadingCurrentIteration.value = 0;
+    
+    console.log('========== 开始迭代优化（跑满20次） ==========');
+    
+    for (let iteration = 0; iteration < maxIterations; iteration++) {
+      loadingCurrentIteration.value = iteration + 1;
+      loadingStage.value = `正在迭代优化加权维诺图...`;
+      await waitNextFrame();
+      
+      // 创建临时canvas用于计算（避免频繁重绘主canvas）
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = width;
+      tempCanvas.height = height;
+      const tempCtx = tempCanvas.getContext('2d');
+      
+      // 绘制当前迭代的加权维诺图（使用临时颜色，仅用于计算区域映射）
+      const currentRegionPixelMap = await drawWeightedVoronoi(tempCtx, currentSites, cityOrder, width, height, tempColors, 2);
+      
+      // 计算面积误差率（不输出详细信息，只在最后一次输出）
+      const { averageErrorRate, actualAreas, expectedAreas } = calculateAreaErrorRate(
+        currentRegionPixelMap, 
+        currentSites, 
+        cityOrder, 
+        width, 
+        height, 
+        false // 不输出详细信息
+      );
+      
+      console.log(`迭代 ${iteration + 1}: 平均面积误差率 = ${averageErrorRate.toFixed(2)}%`);
+      
+      // 保存最佳结果（误差率最小的）
+      if (averageErrorRate < bestErrorRate) {
+        bestErrorRate = averageErrorRate;
+        bestSites = currentSites.map(s => ({ ...s })); // 深拷贝
+        bestRegionPixelMap = new Uint8Array(currentRegionPixelMap);
+        // console.log(`  → 更新最佳结果: ${bestErrorRate.toFixed(2)}%`);
+      }
+      
+      // 如果不是最后一次迭代，将种子点直接移动到质心处
+      if (iteration < maxIterations - 1) {
+        currentSites = adjustSeedPoints(
+          currentSites,
+          currentRegionPixelMap,
+          cityOrder,
+          width,
+          height
+        );
+      }
+    }
+    
+    console.log(`迭代优化完成，最佳平均面积误差率: ${bestErrorRate.toFixed(2)}%`);
+    console.log('');
+    
+    // 7. 基于最优剖分计算颜色（确保相邻区域颜色不同）
+    loadingStage.value = '正在计算颜色分配（基于最优剖分）...';
+    await waitNextFrame();
+    
+    // 如果没有最佳区域映射，先计算一次
+    if (!bestRegionPixelMap) {
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = width;
+      tempCanvas.height = height;
+      const tempCtx = tempCanvas.getContext('2d');
+      // 使用临时颜色先计算区域映射
+      const tempColors = cityOrder.map(() => ({ r: 200, g: 200, b: 200, a: 255 }));
+      bestRegionPixelMap = await drawWeightedVoronoi(tempCtx, bestSites, cityOrder, width, height, tempColors, 2);
+    }
+    
+    // 基于最优区域映射计算颜色
+    const { colors, colorIndices } = precomputeCityColors(cityOrder, bestRegionPixelMap, width, height, true);
+    savedColorIndices = colorIndices;
+    savedMultiColorColors = colors;
+    
+    // 8. 使用最佳结果绘制最终维诺图
+    loadingStage.value = '正在绘制最终加权维诺图...';
+    await waitNextFrame();
+    
+    // 清空canvas
+    voronoiCtx.clearRect(0, 0, width, height);
+    
+    // 保存区域映射
+    savedRegionPixelMap = bestRegionPixelMap;
+    
+    // 根据背景模式决定如何绘制
+    if (poiStore.colorSettings.backgroundMode === 'multi') {
+      // 复色模式：从区域映射绘制颜色（使用基于最优剖分计算的颜色）
+      const imageData = voronoiCtx.createImageData(width, height);
+      const data = imageData.data;
+      
+      for (let i = 0; i < bestRegionPixelMap.length; i++) {
+        const cityIndex = bestRegionPixelMap[i];
+        if (cityIndex !== undefined && cityIndex < colors.length) {
+          const color = colors[cityIndex];
+          const idx = i * 4;
+          data[idx] = color.r;
+          data[idx + 1] = color.g;
+          data[idx + 2] = color.b;
+          data[idx + 3] = color.a;
+        }
+      }
+      
+      voronoiCtx.putImageData(imageData, 0, 0);
+    } else {
+      // 单色模式：填充单色背景
+      const singleColor = poiStore.colorSettings.background || '#ffffff';
+      voronoiCtx.fillStyle = singleColor;
+      voronoiCtx.fillRect(0, 0, width, height);
+    }
+    
+    // 8. 计算并输出最终面积误差率（输出详细信息）
+    loadingStage.value = '正在计算最终面积误差率...';
+    await waitNextFrame();
+    const finalErrorRate = calculateAreaErrorRate(savedRegionPixelMap, bestSites, cityOrder, width, height, true);
+    console.log(`最终平均面积误差率: ${finalErrorRate.averageErrorRate.toFixed(2)}%`);
+    
+    // 更新保存的站点信息（使用优化后的位置）
+    savedSites = bestSites;
+    
+    // 9. 在各个城市子空间内绘制POI词云
+    // 切换到词云模式
+    loadingMode.value = 'wordcloud';
+    loadingTotalCities.value = cityOrder.length;
+    loadingCurrentIndex.value = 0;
+    loadingStage.value = '正在绘制词云...';
+    await waitNextFrame();
+    await drawWordCloudsInRegions(wordCloudCtx, savedRegionPixelMap, cityOrder, data, width, height, savedColorIndices);
+    
+    // 10. 绘制城市之间的连接线
+    drawCityLines();
+    
+    // 保存状态
+    savedCanvasSize = { width, height };
+    savedCityOrder = [...cityOrder];
+    
+    console.log('加权维诺图绘制完成');
+    
+    // 记录词云生成
     try {
       await recordTagCloudGeneration('voronoi');
-      // 触发事件通知 FooterBar 更新统计数据
       window.dispatchEvent(new CustomEvent('tagcloud-generated'));
     } catch (error) {
       console.warn('记录词云生成失败:', error);
     }
+    
+  } catch (error) {
+    console.error('[TagCloudCanvas] handleRenderCloud 错误:', error);
   } finally {
-    // 确保 loading 至少显示最小时间
-    const elapsed = Date.now() - startTime;
-    if (elapsed < minDisplayTime) {
-      await new Promise(resolve => setTimeout(resolve, minDisplayTime - elapsed));
-    }
     poiStore.setCloudLoading(false);
-    // 重置遮罩提示
+    loadingMode.value = 'voronoi';
     loadingStage.value = '';
     loadingCurrentCity.value = '';
     loadingCurrentIndex.value = 0;
     loadingTotalCities.value = 0;
+    loadingCurrentIteration.value = 0;
+    loadingTotalIterations.value = 0;
   }
 };
 
@@ -3108,7 +2455,7 @@ watch(
       if (backgroundModeChanged && voronoiCtx && voronoiCanvas) {
         if (newVal.backgroundMode === 'single') {
           // 切换到单色模式：快速填充整个canvas为单色
-          console.log('切换到单色模式，快速填充canvas...');
+          // console.log('切换到单色模式，快速填充canvas...');
           const singleColor = newVal.background || '#ffffff';
           voronoiCtx.fillStyle = singleColor;
           voronoiCtx.fillRect(0, 0, voronoiCanvas.width, voronoiCanvas.height);
@@ -3116,7 +2463,7 @@ watch(
           // 文字颜色不需要变化（因为文字颜色由textColorMode控制）
         } else if (newVal.backgroundMode === 'multi' && savedRegionPixelMap && savedCityOrder && savedColorIndices) {
           // 切换回复色模式：使用保存的复色颜色信息（即使一开始是单色模式，也保存了复色颜色）
-          console.log('切换回复色模式，使用保存的复色颜色信息...');
+          // console.log('切换回复色模式，使用保存的复色颜色信息...');
           const success = fastUpdateBackgroundColors(
             voronoiCtx, 
             voronoiCanvas.width, 
@@ -3125,11 +2472,11 @@ watch(
           );
           if (success && savedWordCloudLayout && wordCloudCtx && wordCloudCanvas) {
             // 同步更新文字颜色
-            console.log('同步更新文字颜色...');
+            // console.log('同步更新文字颜色...');
             wordCloudCtx.clearRect(0, 0, wordCloudCanvas.width, wordCloudCanvas.height);
             renderWordCloudFromLayout(wordCloudCtx, savedWordCloudLayout, wordCloudCanvas.width, wordCloudCanvas.height);
           } else if (!success) {
-            console.warn('快速更新背景颜色失败，可能需要完整重新生成');
+            // console.warn('快速更新背景颜色失败，可能需要完整重新生成');
           }
         } else {
           // 如果没有保存的数据，需要完整重新生成
@@ -3142,7 +2489,7 @@ watch(
       if (paletteChanged && !backgroundModeChanged && savedRegionPixelMap && savedCityOrder && savedColorIndices) {
         // 配色方案变化（色带颜色自定义），颜色索引不变，只需更新颜色值
         // 重要：必须强制从新的配色方案重新计算，确保背景色和文字颜色一致
-        console.log('配色方案变化（色带颜色自定义），快速更新背景和文字颜色...');
+        // console.log('配色方案变化（色带颜色自定义），快速更新背景和文字颜色...');
         if (voronoiCtx && voronoiCanvas) {
           const success = fastUpdateBackgroundColors(
             voronoiCtx, 
@@ -3186,18 +2533,18 @@ watch(
                   a: Math.floor(255 * opacity)
                 };
               });
-              console.log('已更新保存的复色颜色信息，使用新的配色方案');
+              // console.log('已更新保存的复色颜色信息，使用新的配色方案');
             }
             
             // 背景颜色更新成功后，同步更新文字颜色（确保使用相同的颜色索引和颜色值）
             if (savedWordCloudLayout && wordCloudCtx && wordCloudCanvas) {
               console.log('同步更新文字颜色（使用相同的图着色颜色索引和新的配色方案）...');
-              wordCloudCtx.clearRect(0, 0, wordCloudCanvas.width, wordCloudCanvas.height);
+              // wordCloudCtx.clearRect(0, 0, wordCloudCanvas.width, wordCloudCanvas.height);
               renderWordCloudFromLayout(wordCloudCtx, savedWordCloudLayout, wordCloudCanvas.width, wordCloudCanvas.height);
             }
           } else {
             // 如果快速更新失败，回退到完整重新生成
-            console.log('快速更新失败，回退到完整重新生成');
+            // console.log('快速更新失败，回退到完整重新生成');
             handleRenderCloud();
           }
         }
@@ -3207,7 +2554,7 @@ watch(
       // 处理纯文字配色变化
       if (pureTextColorChanged && !backgroundChanged && savedWordCloudLayout) {
         // 只有文字配色变化（不包括配色方案），且已有保存的布局，快速重绘词云
-        console.log('文字配色变化，快速重绘词云...');
+        // console.log('文字配色变化，快速重绘词云...');
         if (wordCloudCtx && wordCloudCanvas) {
           wordCloudCtx.clearRect(0, 0, wordCloudCanvas.width, wordCloudCanvas.height);
           renderWordCloudFromLayout(wordCloudCtx, savedWordCloudLayout, wordCloudCanvas.width, wordCloudCanvas.height);
@@ -3218,7 +2565,7 @@ watch(
       // 处理背景配色变化（不包括配色方案变化和背景模式变化）
       if (backgroundChanged && !paletteChanged && !backgroundModeChanged && savedRegionPixelMap && savedCityOrder && savedColorIndices) {
         // 背景配色变化（不包括配色方案变化），且已有保存的区域映射和颜色索引，快速更新背景和文字颜色
-        console.log('背景配色变化（快速更新模式）...');
+        // console.log('背景配色变化（快速更新模式）...');
         if (voronoiCtx && voronoiCanvas) {
           const success = fastUpdateBackgroundColors(
             voronoiCtx, 
@@ -3229,13 +2576,13 @@ watch(
           if (success) {
             // 背景颜色更新成功后，同步更新文字颜色（确保使用相同的颜色索引和颜色值）
             if (savedWordCloudLayout && wordCloudCtx && wordCloudCanvas) {
-              console.log('同步更新文字颜色（使用相同的图着色颜色索引）...');
+              // console.log('同步更新文字颜色（使用相同的图着色颜色索引）...');
               wordCloudCtx.clearRect(0, 0, wordCloudCanvas.width, wordCloudCanvas.height);
               renderWordCloudFromLayout(wordCloudCtx, savedWordCloudLayout, wordCloudCanvas.width, wordCloudCanvas.height);
             }
           } else {
             // 如果快速更新失败，回退到完整重新生成
-            console.log('快速更新失败，回退到完整重新生成');
+            // console.log('快速更新失败，回退到完整重新生成');
             handleRenderCloud();
           }
         }
@@ -3256,43 +2603,102 @@ watch(
   { deep: true }
 );
 
+// 中文字体列表（用于判断字体类型）
+const chineseFonts = [
+  '等线', '等线 Light', '方正舒体', '方正姚体', '仿宋', '黑体',
+  '华文彩云', '华文仿宋', '华文琥珀', '华文楷体', '华文隶书', '华文宋体', 
+  '华文细黑', '华文新魏', '华文行楷', '华文中宋', '楷体', '隶书', 
+  '宋体', '微软雅黑', '微软雅黑 Light', '新宋体', '幼圆', '思源黑体'
+];
+
+// 英文字体列表（用于判断字体类型）
+const englishFonts = [
+  'Arial', 'Inter', 
+  'Times New Roman', 'Georgia', 'Verdana', 'Courier New', 'Comic Sans MS',
+  'Impact', 'Trebuchet MS', 'Palatino', 'Garamond', 
+  'Helvetica', 'Tahoma', 'Lucida Console', 'Century Gothic', 'Franklin Gothic',
+  'Baskerville',
+];
+
+// 判断字体是否为中文字体
+const isChineseFont = (fontName) => {
+  return chineseFonts.includes(fontName);
+};
+
+// 判断字体是否为英文字体
+const isEnglishFont = (fontName) => {
+  return englishFonts.includes(fontName);
+};
+
 // watch字体设置变化 - 区分"仅重新布局词云"和"仅样式重绘"
 watch(
   () => ({...poiStore.fontSettings}),
   async (newVal, oldVal) => {
-    if (!oldVal) {
+    if (!oldVal || !poiStore.hasDrawing) {
       return;
     }
     
-    // 检查是否需要完整重绘（重新定位标签）
-    // 需要完整重绘的情况：语言、序号、字号区间、英文字体库
-    const needsFullRedraw = 
-      newVal.language !== oldVal.language ||
-      newVal.showCityIndex !== oldVal.showCityIndex ||
+    // ========== 改变词云布局的交互（需要重新生成词云） ==========
+    // 语言切换（中英文切换）
+    const languageChanged = newVal.language !== oldVal.language;
+    // 序号的显示与否
+    const showCityIndexChanged = newVal.showCityIndex !== oldVal.showCityIndex;
+    // 字号区间变化（会影响标签大小，需要重新布局）
+    const fontSizeChanged = 
       newVal.minFontSize !== oldVal.minFontSize ||
-      newVal.maxFontSize !== oldVal.maxFontSize ||
-      (newVal.fontFamily !== oldVal.fontFamily && newVal.language === 'en'); // 英文字体库变化
+      newVal.maxFontSize !== oldVal.maxFontSize;
+    // 英文字体变化（会影响标签大小，需要重新布局）
+    const englishFontChanged = 
+      newVal.fontFamily !== oldVal.fontFamily && 
+      (isEnglishFont(newVal.fontFamily) || isEnglishFont(oldVal.fontFamily));
+    // 英文字重变化（会影响标签大小，需要重新布局）
+    const englishWeightChanged = 
+      newVal.fontWeight !== oldVal.fontWeight &&
+      newVal.language === 'en';
     
-    // 检查是否只需要样式重绘（基于原有位置重新绘制样式）
-    // 只需要样式重绘的情况：字重、中文字体库
-    const needsStyleRedraw = 
-      newVal.fontWeight !== oldVal.fontWeight ||
-      (newVal.fontFamily !== oldVal.fontFamily && newVal.language === 'zh'); // 中文字体库变化
+    // ========== 不改变词云布局的交互（只需要更新显示） ==========
+    // 中文字重变化（不影响标签大小，只需更新样式）
+    const chineseWeightChanged = 
+      newVal.fontWeight !== oldVal.fontWeight &&
+      newVal.language === 'zh';
+    // 中文字体变化（不影响标签大小，只需更新样式）
+    const chineseFontChanged = 
+      newVal.fontFamily !== oldVal.fontFamily &&
+      (isChineseFont(newVal.fontFamily) || isChineseFont(oldVal.fontFamily)) &&
+      newVal.language === 'zh';
     
-    // 如果需要完整重绘标签布局，优先只在现有Voronoi结果上重新生成词云
-    if (needsFullRedraw && poiStore.hasDrawing) {
-      console.log('字体设置变化（语言/序号/字号区间/英文字体库），仅在现有加权Voronoi基础上重新布局词云（不重新计算背景）...');
+    // 处理改变词云布局的交互
+    if (languageChanged || showCityIndexChanged || fontSizeChanged || englishFontChanged || englishWeightChanged) {
+      console.log('字体设置变化（需要重新布局词云）：', {
+        languageChanged,
+        showCityIndexChanged,
+        fontSizeChanged,
+        englishFontChanged,
+        englishWeightChanged
+      });
+      
+      // 如果是语言切换，需要等待数据重新编译
+      if (languageChanged) {
+        await nextTick();
+        await new Promise(resolve => setTimeout(resolve, 100)); // 给一点时间让数据编译完成
+      }
+      
+      // 仅在现有加权Voronoi基础上重新生成词云布局
       await relayoutWordCloudOnly();
       return;
     }
     
-    // 如果只需要样式重绘，基于原有位置重新绘制样式
-    if (needsStyleRedraw && poiStore.hasDrawing && savedWordCloudLayout) {
-      console.log('字体设置变化（字重/中文字体库），快速重绘词云样式...');
-      if (wordCloudCtx && wordCloudCanvas) {
-        wordCloudCtx.clearRect(0, 0, wordCloudCanvas.width, wordCloudCanvas.height);
-        renderWordCloudFromLayout(wordCloudCtx, savedWordCloudLayout, wordCloudCanvas.width, wordCloudCanvas.height);
-      }
+    // 处理不改变词云布局的交互（只需要更新显示）
+    if ((chineseWeightChanged || chineseFontChanged) && savedWordCloudLayout && wordCloudCtx && wordCloudCanvas) {
+      console.log('字体设置变化（只需更新样式）：', {
+        chineseWeightChanged,
+        chineseFontChanged
+      });
+      
+      // 基于原有位置重新绘制样式
+      wordCloudCtx.clearRect(0, 0, wordCloudCanvas.width, wordCloudCanvas.height);
+      renderWordCloudFromLayout(wordCloudCtx, savedWordCloudLayout, wordCloudCanvas.width, wordCloudCanvas.height);
+      return;
     }
   },
   { deep: true }
@@ -3519,6 +2925,13 @@ canvas {
   color: #666;
   max-width: 420px;
   text-align: center;
+}
+
+.cloud-loading-iteration-text {
+  font-size: 16px;
+  color: #606266;
+  margin-top: 8px;
+  font-weight: 500;
 }
 
 .cloud-loading-city-text {
