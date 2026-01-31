@@ -13,15 +13,18 @@
     <template v-else-if="!showHelpPage">
       <div class="app-body">
         <SideMenu
+          ref="sideMenuRef"
           :active-panel="activePanel"
           @change-panel="handleChangePanel"
           @navigate="handleNavigate"
+          @module-visibility-change="handleModuleVisibilityChange"
         />
         <div class="workspace">
-          <PoiContent ref="poiContentRef" v-show="activePanel === 'content'" />
-          <TypefacePanel v-show="activePanel === 'typeface'" />
-          <ColorPanel v-show="activePanel === 'color'" />
-          <LinePanel v-show="activePanel === 'line'" />
+          <PoiContent ref="poiContentRef" v-show="activePanel === 'content' && moduleVisibility.content" />
+          <TypefacePanel v-show="activePanel === 'typeface' && moduleVisibility.typeface" />
+          <ColorPanel v-show="activePanel === 'color' && moduleVisibility.color" />
+          <LinePanel v-show="activePanel === 'line' && moduleVisibility.line" />
+          <BatchTestPanel v-if="moduleVisibility.batchtest" v-show="activePanel === 'batchtest'" />
         </div>
         <SplitterBar />
         <TagCloudCanvas ref="tagCloudCanvasRef" />
@@ -45,16 +48,50 @@ import ColorPanel from '@/components/color/ColorPanel.vue';
 import TagCloudCanvas from '@/components/tagcloud/TagCloudCanvas.vue';
 import SplitterBar from '@/components/common/SplitterBar.vue';
 import LinePanel from '@/components/line/LinePanel.vue';
+import BatchTestPanel from '@/components/batchtest/BatchTestPanel.vue';
 import FeedbackPage from '@/components/feedback/FeedbackPage.vue';
 import HelpPage from '@/components/help/HelpPage.vue';
 import { recordPageVisit } from '@/utils/statistics';
-
 const activePanel = ref('content');
 const headerRef = ref(null);
 const poiContentRef = ref(null);
 const tagCloudCanvasRef = ref(null);
+const sideMenuRef = ref(null);
 const showHelpPage = ref(false);
 const showFeedbackPage = ref(false);
+
+// 模块可见性设置
+const MODULE_VISIBILITY_KEY = 'tagCloud_voronoi_moduleVisibility';
+const defaultModuleVisibility = {
+  content: true,
+  typeface: true,
+  color: true,
+  line: true,
+  batchtest: false,
+};
+
+// 从 localStorage 读取模块可见性设置
+const loadModuleVisibility = () => {
+  try {
+    const saved = localStorage.getItem(MODULE_VISIBILITY_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      // 合并默认设置和保存的设置
+      // 对于批量测试，如果用户没有明确设置过，使用默认值 false
+      const result = { ...defaultModuleVisibility, ...parsed };
+      // 如果保存的设置中没有 batchtest 字段，使用默认值 false
+      if (!('batchtest' in parsed)) {
+        result.batchtest = defaultModuleVisibility.batchtest;
+      }
+      return result;
+    }
+  } catch (error) {
+    console.warn('读取模块可见性设置失败:', error);
+  }
+  return { ...defaultModuleVisibility };
+};
+
+const moduleVisibility = ref(loadModuleVisibility());
 
 let firstIntroStarted = false;
 let currentIntro = null;
@@ -94,7 +131,32 @@ const addCheckboxToIntro = (content) => {
 };
 
 const handleChangePanel = (panel) => {
+  // 检查该面板是否可见
+  if (moduleVisibility.value[panel] === false) {
+    // 如果不可见，切换到第一个可见的面板
+    const visiblePanels = Object.keys(moduleVisibility.value).filter(
+      key => moduleVisibility.value[key] === true
+    );
+    if (visiblePanels.length > 0) {
+      activePanel.value = visiblePanels[0];
+    }
+    return;
+  }
   activePanel.value = panel;
+};
+
+// 处理模块可见性变化
+const handleModuleVisibilityChange = ({ moduleKey, visible }) => {
+  moduleVisibility.value[moduleKey] = visible;
+  // 如果当前激活的面板被隐藏，切换到第一个可见的面板
+  if (!visible && activePanel.value === moduleKey) {
+    const visiblePanels = Object.keys(moduleVisibility.value).filter(
+      key => moduleVisibility.value[key] === true && key !== moduleKey
+    );
+    if (visiblePanels.length > 0) {
+      activePanel.value = visiblePanels[0];
+    }
+  }
 };
 
 const handleNavigate = (route) => {

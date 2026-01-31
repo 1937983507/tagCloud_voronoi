@@ -13,21 +13,46 @@
       </button>
     </div>
     <div class="menu-group footer-group">
+      <button class="menu-item ghost" @click="handleSettingsClick">设置</button>
       <button class="menu-item ghost" @click="handleShortcutClick">快捷键</button>
       <button class="menu-item ghost" @click="handleHelpClick">帮助</button>
       <button class="menu-item ghost" @click="handleHideClick">隐藏</button>
     </div>
+    
+    <!-- 设置对话框 -->
+    <el-dialog
+      v-model="settingsDialogVisible"
+      title="模块显示设置"
+      width="400px"
+      :close-on-click-modal="true"
+      :close-on-press-escape="true"
+    >
+      <div class="settings-content">
+        <div class="settings-item" v-for="module in moduleSettings" :key="module.key">
+          <el-checkbox
+            :model-value="moduleVisibility[module.key]"
+            @update:model-value="(val) => handleModuleVisibilityChange(module.key, val)"
+          >
+            {{ module.label }}
+          </el-checkbox>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="settingsDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </aside>
 </template>
 
 <script setup>
+import { computed, ref } from 'vue';
 import { ElMessage } from 'element-plus';
 import {
   BrushFilled,
   Collection,
   EditPen,
-  Grid,
   Connection,
+  DataAnalysis,
 } from '@element-plus/icons-vue';
 
 defineProps({
@@ -37,14 +62,93 @@ defineProps({
   },
 });
 
-const emit = defineEmits(['change-panel', 'navigate']);
+const emit = defineEmits(['change-panel', 'navigate', 'module-visibility-change']);
 
-const mainMenu = [
+// localStorage key
+const MODULE_VISIBILITY_KEY = 'tagCloud_voronoi_moduleVisibility';
+
+// 默认模块可见性设置（只有批量测试默认不显示）
+const defaultModuleVisibility = {
+  content: true,
+  typeface: true,
+  color: true,
+  line: true,
+  batchtest: false,
+};
+
+// 从 localStorage 读取模块可见性设置
+const loadModuleVisibility = () => {
+  try {
+    const saved = localStorage.getItem(MODULE_VISIBILITY_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      // 合并默认设置和保存的设置，确保所有模块都有值
+      // 对于批量测试，如果用户没有明确设置过，使用默认值 false
+      const result = { ...defaultModuleVisibility, ...parsed };
+      // 如果保存的设置中没有 batchtest 字段，使用默认值 false
+      if (!('batchtest' in parsed)) {
+        result.batchtest = defaultModuleVisibility.batchtest;
+      }
+      return result;
+    }
+  } catch (error) {
+    console.warn('读取模块可见性设置失败:', error);
+  }
+  return { ...defaultModuleVisibility };
+};
+
+// 保存模块可见性设置到 localStorage
+const saveModuleVisibility = (visibility) => {
+  try {
+    localStorage.setItem(MODULE_VISIBILITY_KEY, JSON.stringify(visibility));
+  } catch (error) {
+    console.warn('保存模块可见性设置失败:', error);
+  }
+};
+
+// 模块可见性状态
+const moduleVisibility = ref(loadModuleVisibility());
+
+// 设置对话框可见性
+const settingsDialogVisible = ref(false);
+
+// 模块设置列表（用于对话框显示）
+const moduleSettings = [
+  { key: 'content', label: '内容' },
+  { key: 'typeface', label: '字体' },
+  { key: 'color', label: '配色' },
+  { key: 'line', label: '线条' },
+  { key: 'batchtest', label: '批量测试' },
+];
+
+// 完整的菜单配置
+const allMenuItems = [
   { key: 'content', label: '内容', icon: Collection },
   { key: 'typeface', label: '字体', icon: EditPen },
   { key: 'color', label: '配色', icon: BrushFilled },
-  { key: 'line', label: '线条', icon: Connection }, // 新增线条按钮 选用Connection图标
+  { key: 'line', label: '线条', icon: Connection },
+  { key: 'batchtest', label: '批量测试', icon: DataAnalysis },
 ];
+
+// 根据模块可见性设置过滤菜单项
+const mainMenu = computed(() => {
+  return allMenuItems.filter(item => {
+    // 检查模块可见性设置
+    return moduleVisibility.value[item.key] === true;
+  });
+});
+
+// 处理模块可见性变化
+const handleModuleVisibilityChange = (moduleKey, visible) => {
+  moduleVisibility.value[moduleKey] = visible;
+  saveModuleVisibility(moduleVisibility.value);
+  emit('module-visibility-change', { moduleKey, visible });
+};
+
+// 打开设置对话框
+const handleSettingsClick = () => {
+  settingsDialogVisible.value = true;
+};
 
 const handleShortcutClick = () => {
   ElMessage.info('该功能正在开发中，敬请期待！');
@@ -57,6 +161,11 @@ const handleHelpClick = () => {
 const handleHideClick = () => {
   ElMessage.info('该功能正在开发中，敬请期待！');
 };
+
+// 暴露模块可见性状态，供父组件访问
+defineExpose({
+  moduleVisibility,
+});
 </script>
 
 <style scoped>
@@ -152,6 +261,28 @@ const handleHideClick = () => {
   margin-top: auto;
   flex-direction: column;
   gap: 12px;
+}
+
+.settings-content {
+  padding: 8px 0;
+}
+
+.settings-item {
+  padding: 12px 0;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.settings-item:last-child {
+  border-bottom: none;
+}
+
+.settings-item :deep(.el-checkbox) {
+  width: 100%;
+}
+
+.settings-item :deep(.el-checkbox__label) {
+  font-size: 14px;
+  color: #1f2333;
 }
 </style>
 

@@ -981,19 +981,311 @@ const calculateAreaErrorRate = (regionPixelMap, sitesWithWeights, cityOrder, wid
   // 计算平均面积误差率
   const averageErrorRate = cityOrder.length > 0 ? totalErrorRate / cityOrder.length : 0;
   
-  // 输出到控制台（仅在verbose模式下）
-  if (verbose) {
-    console.log('========== 加权维诺图面积误差率统计 ==========');
-    console.log(`总画布面积: ${totalArea} 像素`);
-    console.log(`总权重: ${totalWeight.toFixed(2)}`);
-    console.log(`平均面积误差率: ${averageErrorRate.toFixed(2)}%`);
-    console.log('');
-    console.log('各个子空间的详细指标:');
-    console.table(areaMetrics);
-    console.log('==============================================');
-  }
   
   return { averageErrorRate, areaMetrics, actualAreas, expectedAreas };
+};
+
+/**
+ * 判断两个voronoi区域是否相邻
+ * @param {Uint8Array} regionPixelMap - 区域像素映射
+ * @param {number} cityIndex1 - 城市1的索引
+ * @param {number} cityIndex2 - 城市2的索引
+ * @param {number} width - 画布宽度
+ * @param {number} height - 画布高度
+ * @returns {boolean} 是否相邻
+ */
+const areVoronoiRegionsAdjacent = (regionPixelMap, cityIndex1, cityIndex2, width, height) => {
+  // 检查两个区域是否有相邻的像素
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = y * width + x;
+      if (regionPixelMap[idx] === cityIndex1) {
+        // 检查上下左右四个方向的像素
+        const neighbors = [
+          { x: x - 1, y: y },     // 左
+          { x: x + 1, y: y },     // 右
+          { x: x, y: y - 1 },     // 上
+          { x: x, y: y + 1 }      // 下
+        ];
+        
+        for (const neighbor of neighbors) {
+          if (neighbor.x >= 0 && neighbor.x < width && neighbor.y >= 0 && neighbor.y < height) {
+            const neighborIdx = neighbor.y * width + neighbor.x;
+            if (regionPixelMap[neighborIdx] === cityIndex2) {
+              return true;
+            }
+          }
+        }
+      }
+    }
+  }
+  return false;
+};
+
+/**
+ * 计算指标的函数
+ * @param {Uint8Array} regionPixelMap - 区域像素映射
+ * @param {Array} cityOrder - 城市顺序
+ * @param {Array} sitesWithWeights - 站点数组（包含x, y, weight, city）
+ * @param {Object} data - 编译后的数据
+ * @param {number} width - 画布宽度
+ * @param {number} height - 画布高度
+ * @param {number} renderStartTime - 渲染开始时间
+ * @returns {Object} 指标对象
+ */
+const calculateMetrics = (regionPixelMap, cityOrder, sitesWithWeights, data, width, height, renderStartTime) => {
+  // 1. 线性序列：目前渲染的城市序列
+  const linearSequence = cityOrder.join('-');
+  
+  // 2. 城市节点数量
+  const cityNodeCount = cityOrder.length;
+  
+  // 创建城市索引映射
+  const cityIndexMap = new Map();
+  cityOrder.forEach((city, index) => {
+    cityIndexMap.set(city, index);
+  });
+  
+  // 3. 序列保持度（连续性）：原本相邻的城市节点在voronoi剖分结果下保持相邻的比例
+  let adjacentPairs = 0; // 原本相邻的城市对
+  let stillAdjacentPairs = 0; // 在voronoi剖分结果下仍然相邻的城市对
+  const stillAdjacentCityPairs = []; // 仍然保持连续的城市节点对
+  const brokenCityPairs = []; // 不再连续的城市节点对
+  
+  // 计算原本相邻的城市对
+  for (let i = 0; i < cityOrder.length - 1; i++) {
+    const city1 = cityOrder[i];
+    const city2 = cityOrder[i + 1];
+    adjacentPairs++;
+    
+    const cityIndex1 = cityIndexMap.get(city1);
+    const cityIndex2 = cityIndexMap.get(city2);
+    
+    if (cityIndex1 !== undefined && cityIndex2 !== undefined && 
+        areVoronoiRegionsAdjacent(regionPixelMap, cityIndex1, cityIndex2, width, height)) {
+      stillAdjacentPairs++;
+      stillAdjacentCityPairs.push(`${city1}-${city2}`);
+    } else {
+      brokenCityPairs.push(`${city1}-${city2}`);
+    }
+  }
+  
+  const sequenceContinuity = adjacentPairs > 0 ? stillAdjacentPairs / adjacentPairs : 0;
+  
+  // 4. 可读性：用户视线改变的多少
+  // 计算方式：对于城市序列，计算相邻方向向量之间的夹角
+  let noOffsetCount = 0; // 视线没有偏移的次数（夹角<=6°）
+  let totalVectorPairs = 0; // 总的相邻方向向量对数量
+  const noOffsetPairs = []; // 没有视线偏移的向量对
+  const offsetPairs = []; // 需要转移视线的向量对
+  
+  // 首先计算所有方向向量（使用区域中心点）
+  const directionVectors = [];
+  for (let i = 0; i < cityOrder.length - 1; i++) {
+    const city1 = cityOrder[i];
+    const city2 = cityOrder[i + 1];
+    
+    const cityIndex1 = cityIndexMap.get(city1);
+    const cityIndex2 = cityIndexMap.get(city2);
+    
+    if (cityIndex1 !== undefined && cityIndex2 !== undefined) {
+      // 获取区域中心点
+      const centroid1 = calculateRegionCentroid(regionPixelMap, cityIndex1, width, height);
+      const centroid2 = calculateRegionCentroid(regionPixelMap, cityIndex2, width, height);
+      
+      // 计算方向向量（从city1到city2）
+      const dx = centroid2.cx - centroid1.cx;
+      const dy = centroid2.cy - centroid1.cy;
+      
+      directionVectors.push({
+        fromCity: city1,
+        toCity: city2,
+        dx: dx,
+        dy: dy,
+        angle: Math.atan2(dy, dx)
+      });
+    }
+  }
+  
+  // 计算相邻方向向量之间的夹角
+  const angleDiffs = []; // 存储所有角度差值，用于计算均值和方差
+  for (let i = 0; i < directionVectors.length - 1; i++) {
+    const vector1 = directionVectors[i];
+    const vector2 = directionVectors[i + 1];
+    totalVectorPairs++;
+    
+    // 计算两个向量的夹角
+    const angle1 = vector1.angle;
+    const angle2 = vector2.angle;
+    
+    // 计算角度差（转换为度数）
+    let angleDiff = Math.abs(angle2 - angle1) * 180 / Math.PI;
+    // 处理角度超过180度的情况，取较小的角度
+    if (angleDiff > 180) {
+      angleDiff = 360 - angleDiff;
+    }
+    
+    // 保存角度差值
+    angleDiffs.push(angleDiff);
+    
+    // 如果角度差小于等于6度，认为没有偏移
+    if (angleDiff <= 6) {
+      noOffsetCount++;
+      noOffsetPairs.push(`${vector1.toCity}处 (${vector1.fromCity}→${vector1.toCity} 与 ${vector2.fromCity}→${vector2.toCity} 夹角: ${angleDiff.toFixed(2)}°)`);
+    } else {
+      offsetPairs.push(`${vector1.toCity}处 (${vector1.fromCity}→${vector1.toCity} 与 ${vector2.fromCity}→${vector2.toCity} 夹角: ${angleDiff.toFixed(2)}°)`);
+    }
+  }
+  
+  const readability = totalVectorPairs > 0 ? noOffsetCount / totalVectorPairs : 0;
+  
+  // 计算角度均值和变异系数
+  let angleMean = 0;
+  let angleCoefficientOfVariation = 0;
+  if (angleDiffs.length > 0) {
+    // 计算均值
+    angleMean = angleDiffs.reduce((sum, angle) => sum + angle, 0) / angleDiffs.length;
+    
+    // 计算变异系数（标准差/均值 × 100%）
+    if (angleDiffs.length > 1 && angleMean > 0) {
+      const sumSquaredDiff = angleDiffs.reduce((sum, angle) => {
+        const diff = angle - angleMean;
+        return sum + diff * diff;
+      }, 0);
+      const variance = sumSquaredDiff / angleDiffs.length;
+      const standardDeviation = Math.sqrt(variance);
+      angleCoefficientOfVariation = (standardDeviation / angleMean) * 100;
+    }
+  }
+  
+  // 5. 面积-权重相关性：城市原本的权重与最后剖分得到的面积之间的皮尔逊相关系数
+  const weights = [];
+  const areas = [];
+  
+  // 统计每个区域的实际像素数
+  const actualAreas = new Array(cityOrder.length).fill(0);
+  for (let i = 0; i < regionPixelMap.length; i++) {
+    const cityIndex = regionPixelMap[i];
+    if (cityIndex !== undefined && cityIndex < cityOrder.length) {
+      actualAreas[cityIndex]++;
+    }
+  }
+  
+  cityOrder.forEach((city, index) => {
+    const site = sitesWithWeights.find(s => s.city === city);
+    if (site) {
+      weights.push(site.weight || 0);
+      areas.push(actualAreas[index] || 0);
+    }
+  });
+  
+  // 计算皮尔逊相关系数
+  let areaWeightCorrelation = 0;
+  if (weights.length > 1 && areas.length > 1) {
+    const meanWeight = weights.reduce((a, b) => a + b, 0) / weights.length;
+    const meanArea = areas.reduce((a, b) => a + b, 0) / areas.length;
+    
+    let numerator = 0;
+    let sumSqWeight = 0;
+    let sumSqArea = 0;
+    
+    for (let i = 0; i < weights.length; i++) {
+      const weightDiff = weights[i] - meanWeight;
+      const areaDiff = areas[i] - meanArea;
+      numerator += weightDiff * areaDiff;
+      sumSqWeight += weightDiff * weightDiff;
+      sumSqArea += areaDiff * areaDiff;
+    }
+    
+    const denominator = Math.sqrt(sumSqWeight * sumSqArea);
+    areaWeightCorrelation = denominator > 0 ? numerator / denominator : 0;
+  }
+  
+  // 6. 平均面积误差率：理论应分配的面积与实际分配的面积之间的误差率
+  const totalWeight = sitesWithWeights.reduce((sum, site) => sum + site.weight, 0);
+  const totalArea = width * height;
+  const areaErrorRates = [];
+  
+  cityOrder.forEach((city, index) => {
+    const site = sitesWithWeights.find(s => s.city === city);
+    if (site) {
+      const weight = site.weight || 0;
+      const expectedArea = totalWeight > 0 ? (weight / totalWeight) * totalArea : 0;
+      const actualArea = actualAreas[index] || 0;
+      const error = Math.abs(actualArea - expectedArea);
+      const errorRate = expectedArea > 0 ? (error / expectedArea) * 100 : 0;
+      
+      areaErrorRates.push({
+        city: city,
+        expectedArea: expectedArea.toFixed(2),
+        actualArea: actualArea,
+        errorRate: errorRate.toFixed(2)
+      });
+    }
+  });
+  
+  const averageAreaErrorRate = areaErrorRates.length > 0 
+    ? areaErrorRates.reduce((sum, item) => sum + parseFloat(item.errorRate), 0) / areaErrorRates.length 
+    : 0;
+  
+  // 7. 紧凑性：衡量剖分的各个子空间形状的指标
+  // 单个子空间的紧凑性 = 4π*面积/周长的平方
+  // 计算各个子空间紧凑性的均值
+  const compactnessValues = [];
+  cityOrder.forEach((city, index) => {
+    const area = actualAreas[index] || 0;
+    if (area > 0) {
+      const perimeter = calculateRegionPerimeter(regionPixelMap, index, width, height);
+      if (perimeter > 0) {
+        // 紧凑性 = 4π * 面积 / 周长²
+        const compactness = (4 * Math.PI * area) / (perimeter * perimeter);
+        compactnessValues.push(compactness);
+      }
+    }
+  });
+  
+  const averageCompactness = compactnessValues.length > 0
+    ? compactnessValues.reduce((sum, c) => sum + c, 0) / compactnessValues.length
+    : 0;
+  
+  // 8. 语义信息密度：单位面积内语义信息量（整体标签总数/整体面积）
+  let totalTags = 0;
+  
+  cityOrder.forEach(city => {
+    const cityTags = data[city] ? data[city].length : 0;
+    totalTags += cityTags;
+  });
+  
+  const totalCanvasArea = width * height;
+  const semanticDensity = totalCanvasArea > 0 ? totalTags / totalCanvasArea : 0;
+  
+  // 9. 运行效率：voronoi剖分+各个子节点词云渲染的耗时（ms）
+  const renderEndTime = Date.now();
+  const renderEfficiency = renderEndTime - renderStartTime;
+  
+  return {
+    linearSequence,
+    cityNodeCount,
+    sequenceContinuity,
+    stillAdjacentCityPairs,
+    brokenCityPairs,
+    readability,
+    noOffsetPairs,
+    offsetPairs,
+    angleMean,
+    angleCoefficientOfVariation,
+    areaWeightCorrelation,
+    averageAreaErrorRate,
+    areaErrorRates,
+    averageCompactness,
+    compactnessValues,
+    semanticDensity,
+    totalTags,
+    totalArea: totalCanvasArea.toFixed(2),
+    totalWidth: width.toFixed(2),
+    totalHeight: height.toFixed(2),
+    renderEfficiency
+  };
 };
 
 /**
@@ -1025,6 +1317,51 @@ const calculateRegionCentroid = (regionPixelMap, cityIndex, width, height) => {
   }
   
   return { cx: sumX / count, cy: sumY / count };
+};
+
+/**
+ * 计算区域周长（通过统计边界像素）
+ * @param {Uint8Array} regionPixelMap - 区域像素映射
+ * @param {number} cityIndex - 城市索引
+ * @param {number} width - 画布宽度
+ * @param {number} height - 画布高度
+ * @returns {number} 区域周长（像素数）
+ */
+const calculateRegionPerimeter = (regionPixelMap, cityIndex, width, height) => {
+  let perimeter = 0;
+  const directions = [[0, 1], [1, 0], [0, -1], [-1, 0]]; // 上下左右
+  
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = y * width + x;
+      if (regionPixelMap[idx] === cityIndex) {
+        // 检查是否是边界像素（至少有一个邻居不属于当前区域）
+        let isBoundary = false;
+        for (const [dx, dy] of directions) {
+          const nx = x + dx;
+          const ny = y + dy;
+          
+          // 如果邻居超出边界，认为是边界像素
+          if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
+            isBoundary = true;
+            break;
+          }
+          
+          const neighborIdx = ny * width + nx;
+          if (regionPixelMap[neighborIdx] !== cityIndex) {
+            isBoundary = true;
+            break;
+          }
+        }
+        
+        if (isBoundary) {
+          perimeter++;
+        }
+      }
+    }
+  }
+  
+  return perimeter;
 };
 
 /**
@@ -1810,6 +2147,8 @@ const relayoutWordCloudOnly = async () => {
  * 主渲染函数：生成加权维诺图
  */
 const handleRenderCloud = async () => {
+  const renderStartTime = Date.now(); // 记录开始时间，用于计算运行效率
+  
   try {
     console.info('[TagCloudCanvas] handleRenderCloud 开始', {
       hasDrawing: poiStore.hasDrawing,
@@ -2066,6 +2405,70 @@ const handleRenderCloud = async () => {
     savedCityOrder = [...cityOrder];
     
     console.log('加权维诺图绘制完成');
+    
+    // 11. 计算并输出指标
+    const metrics = calculateMetrics(
+      savedRegionPixelMap, 
+      cityOrder, 
+      bestSites, 
+      data, 
+      width, 
+      height, 
+      renderStartTime
+    );
+    
+    console.log('========== Voronoi 指标统计 ==========');
+    console.log('1. 线性序列:', metrics.linearSequence);
+    console.log('2. 城市节点数量:', metrics.cityNodeCount);
+    
+    console.log('3. 序列保持度（连续性）:', (metrics.sequenceContinuity * 100).toFixed(2) + '%');
+    console.log('   仍然保持连续的城市节点对:', metrics.stillAdjacentCityPairs.length > 0 ? metrics.stillAdjacentCityPairs.join(', ') : '无');
+    console.log('   不再连续的城市节点对:', metrics.brokenCityPairs.length > 0 ? metrics.brokenCityPairs.join(', ') : '无');
+    
+    console.log('4. 可读性:', (metrics.readability * 100).toFixed(2) + '%');
+    console.log('   没有视线偏移的相邻向量对 (夹角<=6°):', metrics.noOffsetPairs.length > 0 ? metrics.noOffsetPairs.join('; ') : '无');
+    console.log('   需要转移视线的相邻向量对 (夹角>6°):', metrics.offsetPairs.length > 0 ? metrics.offsetPairs.join('; ') : '无');
+    console.log('   角度均值:', metrics.angleMean.toFixed(2) + '°');
+    console.log('   角度变异系数:', metrics.angleCoefficientOfVariation.toFixed(2) + '%');
+    
+    console.log('5. 面积-权重相关性:', metrics.areaWeightCorrelation.toFixed(4));
+    
+    console.log('6. 平均面积误差率:', metrics.averageAreaErrorRate.toFixed(2) + '%');
+    console.log('   各个子空间的面积误差率:');
+    metrics.areaErrorRates.forEach(item => {
+      console.log(`      ${item.city}: 理论面积=${item.expectedArea}, 实际面积=${item.actualArea}, 误差率=${item.errorRate}%`);
+    });
+    
+    console.log('7. 紧凑性:', metrics.averageCompactness.toFixed(4));
+    console.log('   各个子空间的紧凑性:');
+    if (metrics.compactnessValues && metrics.compactnessValues.length > 0) {
+      // 统计每个区域的实际面积，用于匹配紧凑性值
+      const actualAreasForCompactness = new Array(cityOrder.length).fill(0);
+      for (let i = 0; i < savedRegionPixelMap.length; i++) {
+        const cityIndex = savedRegionPixelMap[i];
+        if (cityIndex !== undefined && cityIndex < cityOrder.length) {
+          actualAreasForCompactness[cityIndex]++;
+        }
+      }
+      
+      let compactnessIndex = 0;
+      cityOrder.forEach((city, index) => {
+        const area = actualAreasForCompactness[index] || 0;
+        if (area > 0 && compactnessIndex < metrics.compactnessValues.length) {
+          console.log(`      ${city}: ${metrics.compactnessValues[compactnessIndex].toFixed(4)}`);
+          compactnessIndex++;
+        }
+      });
+    }
+    
+    console.log('8. 语义信息密度:', metrics.semanticDensity.toFixed(6));
+    console.log('   总标签数量:', metrics.totalTags);
+    console.log('   总面积:', metrics.totalArea);
+    console.log('   总宽度:', metrics.totalWidth);
+    console.log('   总高度:', metrics.totalHeight);
+    
+    console.log('9. 运行效率:', metrics.renderEfficiency + 'ms');
+    console.log('=====================================');
     
     // 记录词云生成
     try {
