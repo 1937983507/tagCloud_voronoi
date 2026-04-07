@@ -69,6 +69,7 @@
 import { ArrowDown, Loading } from '@element-plus/icons-vue';
 import { usePoiStore } from '@/stores/poiStore';
 import AMapLoader from '@amap/amap-jsapi-loader';
+import { getAmapLoaderConfig } from '@/config/amapLoader';
 import { onMounted, onBeforeUnmount, ref, watch, nextTick } from 'vue';
 import * as turf from '@turf/turf';
 import { loadGeoJson } from '@/utils/geojsonLoader';
@@ -262,27 +263,27 @@ const loadMap = async () => {
   
   try {
     // 先初始化地图，不等待数据加载完成
-    amapGlobal = await AMapLoader.load({
-      key: '80838eddfb922202b289fd1ad6fa4e58',
-      version: '2.0',
-      plugins: [
-        'AMap.ToolBar',
-        'AMap.Scale',
-        'AMap.AutoComplete',
-        'AMap.PlaceSearch',
-        'AMap.TileLayer.Satellite',
-        'AMap.TileLayer.RoadNet',
-        'AMap.TileLayer.Traffic',
-        'AMap.HeatMap',
-        'AMap.MouseTool',
-        'AMap.GeometryUtil',
-        'AMap.MassMarks',
-        'AMap.PolyEditor',
-        'AMap.DragRoute',
-        'AMap.Driving',
-        'AMap.ContextMenu',
-      ],
-    });
+    amapGlobal = await AMapLoader.load(
+      getAmapLoaderConfig({
+        plugins: [
+          'AMap.ToolBar',
+          'AMap.Scale',
+          'AMap.AutoComplete',
+          'AMap.PlaceSearch',
+          'AMap.TileLayer.Satellite',
+          'AMap.TileLayer.RoadNet',
+          'AMap.TileLayer.Traffic',
+          'AMap.HeatMap',
+          'AMap.MouseTool',
+          'AMap.GeometryUtil',
+          'AMap.MassMarks',
+          'AMap.PolyEditor',
+          'AMap.DragRoute',
+          'AMap.Driving',
+          'AMap.ContextMenu',
+        ],
+      }),
+    );
 
     mapInstance = new amapGlobal.Map(mapRef.value, {
       zoom: 5,

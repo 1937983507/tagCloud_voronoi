@@ -214,6 +214,7 @@ import {
 } from '@/utils/batchTestUtils';
 import { renderVoronoiAndCalculateMetrics } from '@/utils/voronoiRenderer';
 import AMapLoader from '@amap/amap-jsapi-loader';
+import { getAmapLoaderConfig } from '@/config/amapLoader';
 
 const poiStore = usePoiStore();
 
@@ -246,11 +247,9 @@ const totalTestCases = computed(() => {
 // 初始化高德地图
 onMounted(async () => {
   try {
-    const AMap = await AMapLoader.load({
-      key: '80838eddfb922202b289fd1ad6fa4e58',
-      version: '2.0',
-      plugins: ['AMap.Driving', 'AMap.GeometryUtil'],
-    });
+    const AMap = await AMapLoader.load(
+      getAmapLoaderConfig({ plugins: ['AMap.Driving', 'AMap.GeometryUtil'] }),
+    );
     amapGlobal = AMap;
     console.log('[BatchTestPanel] 高德地图加载成功');
   } catch (error) {

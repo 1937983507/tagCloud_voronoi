@@ -66,7 +66,7 @@ tagCloud_voronoi/
 
 1. **准备环境**
    - Node.js ≥ 18（Vite 官方推荐版本）
-   - 配置高德 JSAPI 的 Referer 白名单，必要时替换 `PoiMap.vue` 中的 `key`
+   - 在高德开放平台申请 JSAPI Key，配置 Referer 白名单；将 Key 写入项目根目录 `.env` 的 `VITE_AMAP_KEY`（见 `.env.example`）
 
 2. **安装依赖**
 
@@ -109,7 +109,7 @@ tagCloud_voronoi/
 - `public/data/chinapoi.csv`：POI 数据源（含地名、经纬度、城市、全国/城市排名）。
 - `public/data/shi.js`：城市级 GeoJSON，用于 `PoiMap` 识别折线经过的行政区。
 - `public/img/*.png`：TreeMap 示例缩略图、起止点图标、品牌标识。
-- **地图 Key**：默认使用演示 Key，请根据部署环境在 `PoiMap.vue` 中替换。
+- **地图 Key**：通过 `.env` 中的 `VITE_AMAP_KEY` 配置（勿提交 `.env`；部署时在构建环境注入变量）。
 
 ---
 
